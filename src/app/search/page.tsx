@@ -89,6 +89,7 @@ function SearchPageClient() {
   );
   const [netdiskSearchEnabled, setNetdiskSearchEnabled] = useState(false);
   const [magnetSearchEnabled, setMagnetSearchEnabled] = useState(false);
+  const [featureFlagsReady, setFeatureFlagsReady] = useState(false);
   // 繁体转简体转换器
   const converterRef = useRef<((text: string) => string) | null>(null);
   // 转换器是否已初始化
@@ -1016,12 +1017,10 @@ function SearchPageClient() {
     // 获取用户权限
     const authInfo = getAuthInfoFromBrowserCookie();
     setUserRole(authInfo?.role || null);
-    setNetdiskSearchEnabled(
-      !!(window as any).RUNTIME_CONFIG?.NETDISK_SEARCH_ENABLED
-    );
-    setMagnetSearchEnabled(
-      !!(window as any).RUNTIME_CONFIG?.MAGNET_SEARCH_ENABLED
-    );
+    const runtimeConfig = (window as any).RUNTIME_CONFIG || {};
+    setNetdiskSearchEnabled(!!runtimeConfig.NETDISK_SEARCH_ENABLED);
+    setMagnetSearchEnabled(!!runtimeConfig.MAGNET_SEARCH_ENABLED);
+    setFeatureFlagsReady(true);
 
     // 初始化繁体转简体转换器
     if (typeof window !== 'undefined') {
@@ -1113,6 +1112,8 @@ function SearchPageClient() {
   }, []);
 
   useEffect(() => {
+    if (!featureFlagsReady) return;
+
     const typeParam = searchParams.get('type');
     const query = searchParams.get('q');
 
@@ -1135,7 +1136,12 @@ function SearchPageClient() {
     if (!query) {
       document.getElementById('searchInput')?.focus();
     }
-  }, [searchParams, netdiskSearchEnabled, magnetSearchEnabled]);
+  }, [
+    searchParams,
+    netdiskSearchEnabled,
+    magnetSearchEnabled,
+    featureFlagsReady,
+  ]);
 
   useEffect(() => {
     // 等待转换器初始化完成
@@ -1177,6 +1183,41 @@ function SearchPageClient() {
     }
 
     currentQueryRef.current = query.trim();
+
+    const typeParam = searchParams.get('type');
+    const isVideoSearchType = !typeParam || typeParam === 'video';
+
+    if (!isVideoSearchType) {
+      if (eventSourceRef.current) {
+        try {
+          eventSourceRef.current.close();
+        } catch {}
+        eventSourceRef.current = null;
+      }
+      pendingResultsRef.current = [];
+      if (flushTimerRef.current) {
+        clearTimeout(flushTimerRef.current);
+        flushTimerRef.current = null;
+      }
+      setIsLoading(false);
+      setSearchResults([]);
+      setTotalSources(0);
+      setCompletedSources(0);
+      setIsFromCache(false);
+      if (query) {
+        setSearchQuery(query);
+        setShowResults(true);
+        setShowSuggestions(false);
+        addSearchHistory(query);
+      } else {
+        setShowResults(false);
+        setShowSuggestions(false);
+      }
+      if (forceRefresh) {
+        setForceRefresh(false);
+      }
+      return;
+    }
 
     if (query) {
       setSearchQuery(query);
@@ -1357,7 +1398,9 @@ function SearchPageClient() {
         };
       } else {
         // 传统搜索：使用普通接口
-        fetch(appendSpecialSourceParam(`/api/search?q=${encodeURIComponent(trimmed)}`))
+        fetch(
+          appendSpecialSourceParam(`/api/search?q=${encodeURIComponent(trimmed)}`)
+        )
           .then((response) => response.json())
           .then((data) => {
             if (currentQueryRef.current !== trimmed) return;
@@ -1393,6 +1436,8 @@ function SearchPageClient() {
   }, [searchParams, forceRefresh, converterReady]);
 
   useEffect(() => {
+    if (!featureFlagsReady) return;
+
     const typeParam = searchParams.get('type');
     const query = searchParams.get('q');
     if (!query || !query.trim()) return;
@@ -1410,7 +1455,12 @@ function SearchPageClient() {
         setTriggerAcgSearch((prev) => !prev);
       }, 100);
     }
-  }, [searchParams, netdiskSearchEnabled, magnetSearchEnabled]);
+  }, [
+    searchParams,
+    netdiskSearchEnabled,
+    magnetSearchEnabled,
+    featureFlagsReady,
+  ]);
 
   // 组件卸载时，关闭可能存在的连接
   useEffect(() => {
@@ -1775,6 +1825,12 @@ function SearchPageClient() {
           {activeTab === 'pansou' &&
             netdiskSearchEnabled &&
             renderPansouCloudTypeFilter()}
+
+          {activeTab === 'acg' && magnetSearchEnabled && (
+            <div className='mt-4'>
+              <AcgSearch keyword={searchQuery} controlsOnly />
+            </div>
+          )}
         </div>
 
         {pansouCloudFilterOpen &&
@@ -2162,6 +2218,7 @@ function SearchPageClient() {
                   <AcgSearch
                     keyword={searchQuery}
                     triggerSearch={triggerAcgSearch}
+                    showSourceSwitch={false}
                   />
                 </>
               )}

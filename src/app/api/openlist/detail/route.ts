@@ -223,11 +223,19 @@ export async function GET(request: NextRequest) {
         return a.fileName.localeCompare(b.fileName);
       });
 
+    const { resolvePathMeta } = await import('@/lib/openlist-path-meta');
+    const pathMetaResolved = resolvePathMeta(
+      folderName,
+      openListConfig.PathMeta
+    );
+
     return NextResponse.json({
       success: true,
       folder: folderName,
       episodes,
       videoInfo,
+      category: pathMetaResolved.category,
+      refresh14m: pathMetaResolved.refresh14m,
     });
   } catch (error) {
     console.error('获取视频详情失败:', error);

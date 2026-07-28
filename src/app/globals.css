@@ -302,6 +302,14 @@ div[data-media-provider] video {
   z-index: 30;
 }
 
+/* 白底卡片（如二维码）聚焦时保持浅色，避免扫码区域被深色焦点样式盖住 */
+.tv-focusable.tv-focusable-light:focus,
+.tv-focusable.tv-focusable-light:focus-visible,
+.tv-focusable.tv-focusable-light.tv-focused {
+  background-color: #ffffff !important;
+  color: #0f172a !important;
+}
+
 .tv-focusable:focus::after,
 .tv-focusable:focus-visible::after,
 .tv-focused::after {

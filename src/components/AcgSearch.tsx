@@ -2,7 +2,7 @@
 'use client';
 
 import { AlertCircle, Download, ExternalLink, Loader2 } from 'lucide-react';
-import { useCallback,useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 import CapsuleSwitch from '@/components/CapsuleSwitch';
 import Toast, { ToastProps } from '@/components/Toast';
@@ -28,9 +28,11 @@ interface AcgSearchProps {
   keyword: string;
   triggerSearch?: boolean;
   onError?: (error: string) => void;
+  controlsOnly?: boolean;
+  showSourceSwitch?: boolean;
 }
 
-type AcgSearchSource = 'acgrip' | 'mikan' | 'dmhy';
+type AcgSearchSource = 'acgrip' | 'mikan' | 'dmhy' | 'nyaa';
 type DownloadTool = 'aria2' | 'Transmission' | 'qBittorrent';
 
 const downloadToolOptions: Array<{ value: DownloadTool; label: string }> = [
@@ -39,12 +41,32 @@ const downloadToolOptions: Array<{ value: DownloadTool; label: string }> = [
   { value: 'Transmission', label: 'Transmission' },
 ];
 
+const ACG_SOURCE_STORAGE_KEY = 'acgSearchSource';
+const acgSourceOptions: Array<{ label: string; value: AcgSearchSource }> = [
+  { label: 'ACG.RIP', value: 'acgrip' },
+  { label: '蜜柑', value: 'mikan' },
+  { label: '动漫花园', value: 'dmhy' },
+  { label: 'Nyaa', value: 'nyaa' },
+];
+
+function getStoredAcgSource(): AcgSearchSource {
+  if (typeof window === 'undefined') return 'acgrip';
+  const saved = window.localStorage.getItem(ACG_SOURCE_STORAGE_KEY);
+  return acgSourceOptions.some((option) => option.value === saved)
+    ? saved as AcgSearchSource
+    : 'acgrip';
+}
+
 export default function AcgSearch({
   keyword,
   triggerSearch,
   onError,
+  controlsOnly = false,
+  showSourceSwitch = true,
 }: AcgSearchProps) {
-  const [source, setSource] = useState<AcgSearchSource>('acgrip');
+  const [source, setSource] = useState<AcgSearchSource>(() =>
+    getStoredAcgSource()
+  );
   const [loading, setLoading] = useState(false);
   const [allItems, setAllItems] = useState<AcgSearchItem[]>([]); // 所有加载的项目
   const [error, setError] = useState<string | null>(null);
@@ -60,11 +82,34 @@ export default function AcgSearch({
   const isLoadingMoreRef = useRef(false);
   const didInitSourceRef = useRef(false);
 
+  useEffect(() => {
+    const handleSourceChange = (event: Event) => {
+      const nextSource = (event as CustomEvent<AcgSearchSource>).detail;
+      if (acgSourceOptions.some((option) => option.value === nextSource)) {
+        setSource(nextSource);
+      }
+    };
+
+    window.addEventListener('acg-search-source-change', handleSourceChange);
+    return () => {
+      window.removeEventListener('acg-search-source-change', handleSourceChange);
+    };
+  }, []);
+
+  const handleSourceChange = (value: AcgSearchSource) => {
+    setSource(value);
+    window.localStorage.setItem(ACG_SOURCE_STORAGE_KEY, value);
+    window.dispatchEvent(
+      new CustomEvent('acg-search-source-change', { detail: value })
+    );
+  };
+
   // 执行搜索
   const performSearch = async (page: number, isLoadMore = false) => {
     if (isLoadingMoreRef.current) return;
     if (source === 'mikan' && page > 1) return;
     if (source === 'dmhy' && page > 1) return;
+    if (source === 'nyaa' && page > 1) return;
 
     isLoadingMoreRef.current = true;
     setLoading(true);
@@ -76,7 +121,9 @@ export default function AcgSearch({
           ? '/api/acg/mikan'
           : source === 'dmhy'
             ? '/api/acg/dmhy'
-            : '/api/acg/acgrip';
+            : source === 'nyaa'
+              ? '/api/acg/nyaa'
+              : '/api/acg/acgrip';
       const response = await fetch(apiUrl, {
         method: 'POST',
         headers: {
@@ -97,14 +144,24 @@ export default function AcgSearch({
 
       if (isLoadMore) {
         // 追加新数据
-        setAllItems(prev => [...prev, ...data.items]);
+        setAllItems((prev) => [...prev, ...data.items]);
         // 如果当前页没有结果，说明没有更多了
-        setHasMore(source !== 'mikan' && source !== 'dmhy' && data.items.length > 0);
+        setHasMore(
+          source !== 'mikan' &&
+            source !== 'dmhy' &&
+            source !== 'nyaa' &&
+            data.items.length > 0
+        );
       } else {
         // 新搜索，重置数据
         setAllItems(data.items);
         // 如果第一页有结果，假设可能还有更多
-        setHasMore(source !== 'mikan' && source !== 'dmhy' && data.items.length > 0);
+        setHasMore(
+          source !== 'mikan' &&
+            source !== 'dmhy' &&
+            source !== 'nyaa' &&
+            data.items.length > 0
+        );
       }
 
       setCurrentPage(page);
@@ -120,7 +177,7 @@ export default function AcgSearch({
 
   useEffect(() => {
     // triggerSearch 变化时触发搜索（无论是 true 还是 false）
-    if (triggerSearch === undefined) {
+    if (controlsOnly || triggerSearch === undefined) {
       return;
     }
 
@@ -134,10 +191,12 @@ export default function AcgSearch({
     setCurrentPage(1);
     setHasMore(true);
     performSearch(1, false);
-  }, [triggerSearch]);
+  }, [triggerSearch, controlsOnly]);
 
   // 切换搜索源时，自动重新搜索（避免组件初次挂载时重复触发）
   useEffect(() => {
+    if (controlsOnly) return;
+
     if (!didInitSourceRef.current) {
       didInitSourceRef.current = true;
       return;
@@ -150,12 +209,13 @@ export default function AcgSearch({
     setCurrentPage(1);
     setHasMore(true);
     performSearch(1, false);
-  }, [source]);
+  }, [source, controlsOnly]);
 
   // 加载更多数据
   const loadMore = useCallback(() => {
     if (source === 'mikan') return;
     if (source === 'dmhy') return;
+    if (source === 'nyaa') return;
     if (!loading && hasMore && !isLoadingMoreRef.current) {
       performSearch(currentPage + 1, true);
     }
@@ -260,7 +320,9 @@ export default function AcgSearch({
         <div className='flex items-center justify-center py-12'>
           <div className='text-center'>
             <AlertCircle className='mx-auto h-12 w-12 text-red-500 dark:text-red-400' />
-            <p className='mt-4 text-sm text-red-600 dark:text-red-400'>{error}</p>
+            <p className='mt-4 text-sm text-red-600 dark:text-red-400'>
+              {error}
+            </p>
           </div>
         </div>
       );
@@ -349,7 +411,10 @@ export default function AcgSearch({
         </div>
 
         {/* 加载更多指示器 */}
-        {source !== 'mikan' && source !== 'dmhy' && hasMore && (
+        {source !== 'mikan' &&
+          source !== 'dmhy' &&
+          source !== 'nyaa' &&
+          hasMore && (
           <div ref={loadMoreRef} className='flex items-center justify-center py-8'>
             <div className='text-center'>
               <Loader2 className='mx-auto h-6 w-6 animate-spin text-green-600 dark:text-green-400' />
@@ -416,20 +481,24 @@ export default function AcgSearch({
     );
   };
 
+  const sourceSwitch = (
+    <div className='flex justify-center'>
+      <CapsuleSwitch
+        options={acgSourceOptions}
+        active={source}
+        onChange={(value) => handleSourceChange(value as AcgSearchSource)}
+      />
+    </div>
+  );
+
+  if (controlsOnly) {
+    return sourceSwitch;
+  }
+
   return (
     <div className='space-y-6'>
       {/* 搜索源切换 */}
-      <div className='flex justify-center'>
-        <CapsuleSwitch
-          options={[
-            { label: 'ACG.RIP', value: 'acgrip' },
-            { label: '蜜柑', value: 'mikan' },
-            { label: '动漫花园', value: 'dmhy' },
-          ]}
-          active={source}
-          onChange={(value) => setSource(value as AcgSearchSource)}
-        />
-      </div>
+      {showSourceSwitch && sourceSwitch}
       {renderBody()}
 
       {/* Toast 提示 */}

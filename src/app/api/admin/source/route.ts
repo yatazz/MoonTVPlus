@@ -21,6 +21,7 @@ type Action =
   | 'toggle_proxy_mode'
   | 'toggle_special_source'
   | 'set_special_sources'
+  | 'set_client_ad_sources'
   | 'update_weight'
   | 'batch_update_weights';
 
@@ -62,6 +63,7 @@ export async function POST(request: NextRequest) {
       'toggle_proxy_mode',
       'toggle_special_source',
       'set_special_sources',
+      'set_client_ad_sources',
       'update_weight',
       'batch_update_weights',
     ];
@@ -153,6 +155,9 @@ export async function POST(request: NextRequest) {
         adminConfig.SpecialSourceApis = (adminConfig.SpecialSourceApis || []).filter(
           (api) => api !== key
         );
+        adminConfig.ClientAdSourceApis = (adminConfig.ClientAdSourceApis || []).filter(
+          (api) => api !== key
+        );
 
         // 检查并清理用户组和用户的权限数组
         // 清理用户组权限
@@ -234,6 +239,9 @@ export async function POST(request: NextRequest) {
         });
 
         adminConfig.SpecialSourceApis = (adminConfig.SpecialSourceApis || []).filter(
+          (api) => !keysToDelete.includes(api)
+        );
+        adminConfig.ClientAdSourceApis = (adminConfig.ClientAdSourceApis || []).filter(
           (api) => !keysToDelete.includes(api)
         );
 
@@ -330,6 +338,19 @@ export async function POST(request: NextRequest) {
 
         const sourceKeySet = new Set(adminConfig.SourceConfig.map((source) => source.key));
         adminConfig.SpecialSourceApis = Array.from(new Set(keys)).filter((key) =>
+          sourceKeySet.has(key)
+        );
+        break;
+      }
+
+      case 'set_client_ad_sources': {
+        const { keys } = body as { keys?: string[] };
+        if (!Array.isArray(keys)) {
+          return NextResponse.json({ error: 'keys 参数格式错误' }, { status: 400 });
+        }
+
+        const sourceKeySet = new Set(adminConfig.SourceConfig.map((source) => source.key));
+        adminConfig.ClientAdSourceApis = Array.from(new Set(keys)).filter((key) =>
           sourceKeySet.has(key)
         );
         break;

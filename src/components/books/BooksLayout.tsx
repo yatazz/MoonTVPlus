@@ -119,7 +119,10 @@ export default function BooksLayout({
 
   return (
     <div className='min-h-screen bg-[radial-gradient(circle_at_top_left,#fce7f3_0,transparent_34rem),linear-gradient(180deg,#fff7fb_0%,#f8fafc_44%,#f8fafc_100%)] text-slate-900 dark:bg-[radial-gradient(circle_at_top_left,rgba(6,95,70,0.26)_0,transparent_32rem),linear-gradient(180deg,#050505_0%,#09090b_100%)] dark:text-gray-100'>
-      <header className='fixed inset-x-0 top-0 z-40 border-b border-emerald-100/80 bg-white/85 shadow-sm shadow-emerald-950/5 backdrop-blur-xl dark:border-emerald-500/10 dark:bg-gray-950/85 dark:shadow-black/20'>
+      <header
+        className='fixed inset-x-0 top-0 z-40 border-b border-emerald-100/80 bg-white/85 shadow-sm shadow-emerald-950/5 backdrop-blur-xl dark:border-emerald-500/10 dark:bg-gray-950/85 dark:shadow-black/20'
+        style={{ paddingTop: 'env(safe-area-inset-top)' }}
+      >
         <div className='mx-auto flex h-16 max-w-6xl items-center gap-3 px-4'>
           {isRead || pathname === '/books/detail' ? (
             <Link
@@ -240,7 +243,11 @@ export default function BooksLayout({
         </div>
       </header>
       <main
-        className={`mx-auto max-w-6xl ${isRead ? 'pt-16' : 'px-4 pb-24 pt-24'}`}
+        className={`mx-auto max-w-6xl ${
+          isRead
+            ? 'pt-[calc(4rem+env(safe-area-inset-top))]'
+            : 'px-4 pb-24 pt-[calc(6rem+env(safe-area-inset-top))]'
+        }`}
       >
         {children}
       </main>

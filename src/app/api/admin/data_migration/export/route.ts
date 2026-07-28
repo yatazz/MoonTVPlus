@@ -249,8 +249,8 @@ async function getUserPasswordV2(username: string): Promise<string | null> {
       return null;
     }
 
-    // D1 存储：使用 getUserPasswordHash 方法
-    if (storageType === 'd1') {
+    // D1/Turso 存储：使用 getUserPasswordHash 方法
+    if (storageType === 'd1' || storageType === 'turso') {
       if (typeof storage.getUserPasswordHash === 'function') {
         return await storage.getUserPasswordHash(username);
       }

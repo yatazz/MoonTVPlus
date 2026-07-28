@@ -11,6 +11,66 @@ export interface ChangelogEntry {
 
 export const changelog: ChangelogEntry[] = [
   {
+    version: "224.0.0",
+    date: "2026-07-21",
+    added: [
+    "新增Turso(libSQL)数据库支持",
+    "新增流量分析功能",
+    "动漫订阅增加排除关键词",
+    "增加客户端去广告配置",
+    "openlist增加路径元信息配置分类和自动刷新链接功能",
+    "增加动漫数据源桜色镜像站"
+    ],
+    changed: [
+    "tgbot站点名改为自定义站点名",
+    "webtv局域网遥控二维码可聚焦",
+    "设备识别移除tgbot",
+    "IOS PWA沉浸式状态栏支持",
+    "优化动漫数据源图片降级策略"
+    ],
+    fixed: [
+      // 无修复内容
+    ]
+  },
+  {
+    version: "223.3.0",
+    date: "2026-07-06",
+    added: [
+    "接入Telegram Bot功能",
+    "增加本地播放/离线播放状态标识",
+    "公告增加每次显示模式",
+    "增加光鸭云盘名称映射"
+    ],
+    changed: [
+      // 无变更内容
+    ],
+    fixed: [
+      // 无修复内容
+    ]
+  },
+  {
+    version: "223.2.0",
+    date: "2026-06-25",
+    added: [
+    "EdgeOne部署支持",
+    "Web TV增加局域网遥控",
+    "动漫磁力搜索增加Nyaa源",
+    "下载增加IndexedDB模式",
+    "增加下载内容导出功能",
+    "增加自定义X-Emby-Authorization"
+    ],
+    changed: [
+    "UC和夸克网盘增加自动续期机制",
+    "优化预加载策略",
+    "扫码登录成功返回上一页",
+    "用户登出立即失效所有token"
+    ],
+    fixed: [
+    "修复AI总开关关闭后AI评论仍然显示",
+    "修复搜索页带类型参数时仍后台搜索影视类型"
+    ]
+  },
+  {
     version: "223.1.0",
     date: "2026-06-15",
     added: [

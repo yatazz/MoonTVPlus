@@ -61,6 +61,7 @@ import {
   recommendationCacheKeys,
   setRecommendationCache,
 } from '@/lib/recommendations/cache';
+import { getIndexedDBVideoPlaybackUrl } from '@/lib/indexeddb-video-cache';
 import {
   convertSubtitleFileToVttObjectUrl,
   CUSTOM_SUBTITLE_ACCEPT,
@@ -122,6 +123,7 @@ interface SearchCachePayload {
 }
 
 type CustomSubtitleEngine = 'native' | 'jassub';
+type PlaybackSourceBadge = 'local' | 'offline' | null;
 
 interface CustomSubtitleState {
   name: string;
@@ -1534,6 +1536,7 @@ function PlayPageClient() {
 
   // 视频播放地址
   const [videoUrl, setVideoUrl] = useState('');
+  const [playbackSourceBadge, setPlaybackSourceBadge] = useState<PlaybackSourceBadge>(null);
 
   // 视频清晰度列表
   const [videoQualities, setVideoQualities] = useState<Array<{ name: string, url: string }>>([]);
@@ -1545,6 +1548,8 @@ function PlayPageClient() {
   const refreshTimerRef = useRef<NodeJS.Timeout | null>(null); // 14分钟定时器
   const currentXiaoyaUrlRef = useRef<string>(''); // 当前xiaoya原始URL（用于刷新）
   const isInitialLoadRef = useRef(true); // 标记是否为首次加载
+  // xiaoya 仅 m3u8 可续期；openlist 由 refresh14m 决定。用于 startRefreshTimer 自身兜底校验
+  const linkRefreshEligibleRef = useRef(false);
   const suppressPlayRecordJumpOnNextEpisodeChangeRef = useRef(false); // 主动切集时不显示播放记录跳转提示
 
   // 视频源代理模式状态
@@ -1624,6 +1629,7 @@ function PlayPageClient() {
       setCorsFailedUrl(null);
       setIsVideoLoading(true);
       setVideoLoadingStage('sourceChanging');
+      setPlaybackSourceBadge(null);
       setVideoUrl(playUrl);
       setToast({
         message: '转码任务已创建，等待 3 秒后已切换到转码地址',
@@ -2709,6 +2715,19 @@ function PlayPageClient() {
     return Math.round(score * 100) / 100; // 保留两位小数
   };
 
+  const cleanupLocalPlaybackBlobUrls = () => {
+    if (typeof window === 'undefined') return;
+    const urls = (window as any).__localFileBlobUrls;
+    if (Array.isArray(urls)) {
+      urls.forEach((url) => {
+        if (typeof url === 'string' && url.startsWith('blob:')) {
+          URL.revokeObjectURL(url);
+        }
+      });
+    }
+    (window as any).__localFileBlobUrls = [];
+  };
+
   // 检查是否有本地下载的视频
   const checkLocalDownload = async (
     source: string,
@@ -2847,15 +2866,100 @@ function PlayPageClient() {
   };
 
   /**
-   * 刷新xiaoya链接（静默刷新，不改变videoUrl状态）
-   * @param hls HLS实例
-   * @param video 视频元素
-   * @param isScheduled 是否为定时刷新（true=定时，false=错误触发）
+   * 判断当前是否应启用 14 分钟链接续期
+   * xiaoya：始终启用；openlist：PathMeta.refresh14m 为 true
+   */
+  const shouldEnableLinkRefresh = () => {
+    const lazyUrl = currentXiaoyaUrlRef.current;
+    if (!lazyUrl) return false;
+
+    if (lazyUrl.startsWith('/api/xiaoya/play')) {
+      return true;
+    }
+
+    if (lazyUrl.startsWith('/api/openlist/play')) {
+      return Boolean(detailRef.current?.refresh14m);
+    }
+
+    return false;
+  };
+
+  /**
+   * 是否像 HLS/m3u8 播放地址（xiaoya 仍只在此场景启 14 分钟定时器）
+   */
+  const isM3u8LikePlayUrl = (url: string) => {
+    if (!url) return false;
+    const lower = url.toLowerCase();
+    return (
+      lower.includes('.m3u8') ||
+      lower.includes('.m3u') ||
+      lower.includes('/m3u8/') ||
+      lower.includes('m3u8')
+    );
+  };
+
+  /**
+   * 是否应在拿到真实地址后启动 14 分钟定时器
+   * - xiaoya：保持原逻辑，仅 m3u8 启
+   * - openlist：PathMeta.refresh14m 开启即可（签名 URL 常无扩展名）
+   */
+  const shouldStartLinkRefreshTimer = (resolvedPlayUrl?: string) => {
+    if (!shouldEnableLinkRefresh()) {
+      linkRefreshEligibleRef.current = false;
+      return false;
+    }
+    const lazyUrl = currentXiaoyaUrlRef.current;
+    // openlist：PathMeta.refresh14m 已通过 shouldEnableLinkRefresh；签名 URL 常无扩展名
+    if (lazyUrl?.startsWith('/api/openlist/play')) {
+      linkRefreshEligibleRef.current = true;
+      return true;
+    }
+    // xiaoya：保持原逻辑，仅 m3u8 启定时器
+    const ok = isM3u8LikePlayUrl(resolvedPlayUrl || '');
+    linkRefreshEligibleRef.current = ok;
+    return ok;
+  };
+
+  /**
+   * 获取当前播放用的 video / hls 实例（定时器不依赖创建时闭包）
+   */
+  const getPlaybackMedia = (preferredHls?: any, preferredVideo?: HTMLVideoElement) => {
+    const video =
+      preferredVideo ||
+      (artPlayerRef.current?.video as HTMLVideoElement | undefined) ||
+      null;
+    const hls = preferredHls || (video as any)?.hls || null;
+    return { video, hls };
+  };
+
+  /**
+   * 刷新成功后的统一收尾：提示、重置重试、重启定时器
+   */
+  const finishLinkRefresh = (
+    isScheduled: boolean,
+    preferredHls?: any,
+    preferredVideo?: HTMLVideoElement
+  ) => {
+    setIsRefreshingUrl(false);
+    if (artPlayerRef.current) {
+      artPlayerRef.current.notice.show = isScheduled
+        ? '链接已自动刷新'
+        : '链接已过期并自动刷新';
+    }
+    retryCountRef.current = 0;
+    startRefreshTimer(preferredHls, preferredVideo);
+  };
+
+  /**
+   * 刷新 xiaoya / openlist 链接（静默刷新，尽量不打断播放）
+   * - HLS：用 hls.loadSource 换源
+   * - 直链（mp4 等）：直接改 video.src
+   * hls / video 可选；定时器触发时会从 artPlayer 重新取
    */
   const refreshXiaoyaUrl = async (
-    hls: any,
-    video: HTMLVideoElement,
-    isScheduled = false
+    preferredHls?: any,
+    preferredVideo?: HTMLVideoElement,
+    isScheduled: boolean = false
   ) => {
     // 防抖：距离上次刷新不足3秒则不刷新
     const now = Date.now();
@@ -2868,13 +2972,23 @@ function PlayPageClient() {
     if (!isScheduled && retryCountRef.current >= 3) {
       console.error('[链接刷新] 重试次数已达上限');
       setVideoError('链接已过期且刷新失败，请手动刷新页面');
-      hls.destroy();
+      const { hls } = getPlaybackMedia(preferredHls, preferredVideo);
+      try {
+        hls?.destroy?.();
+      } catch {
+        // ignore
+      }
       return false;
     }
 
     // 检查是否有原始URL
     if (!currentXiaoyaUrlRef.current) {
       console.warn('[链接刷新] 无原始URL，跳过刷新');
+      return false;
+    }
+
+    if (!shouldEnableLinkRefresh()) {
+      console.log('[链接刷新] 当前路径未开启 refresh14m，跳过');
       return false;
     }
 
@@ -2887,13 +3001,8 @@ function PlayPageClient() {
     lastRefreshTimeRef.current = now;
 
     try {
-      // 保存当前播放进度
-      const currentTime = video.currentTime;
-      const isPaused = video.paused;
-
-      console.log(`[链接刷新] 开始刷新 (${isScheduled ? '定时' : '错误触发'}), 当前时间:`, currentTime);
-
-      // 重新获取播放链接（添加时间戳避免缓存）
+      // 先请求新链接；请求期间继续播放，进度要在换源前一刻再记录，
+      // 否则恢复会回退到请求开始时的时间点（倒退几秒）
       const separator = currentXiaoyaUrlRef.current.includes('?') ? '&' : '?';
       const fetchUrl = `${currentXiaoyaUrlRef.current}${separator}format=json&t=${Date.now()}`;
 
@@ -2904,100 +3013,214 @@ function PlayPageClient() {
         throw new Error('未获取到有效链接');
       }
 
+      // play 响应可带回 refresh14m，配置热更新后仍一致
+      if (
+        typeof data.refresh14m === 'boolean' &&
+        currentXiaoyaUrlRef.current.startsWith('/api/openlist/play')
+      ) {
+        if (detailRef.current?.source === 'openlist') {
+          detailRef.current.refresh14m = data.refresh14m;
+        }
+        if (!data.refresh14m) {
+          currentXiaoyaUrlRef.current = '';
+          clearRefreshTimer();
+          setIsRefreshingUrl(false);
+          console.log('[链接刷新] play 响应 refresh14m=false，停止续期');
+          return false;
+        }
+      }
+
+      // 保存清晰度列表（若有）
+      if (data.qualities && data.qualities.length > 0) {
+        setVideoQualities(data.qualities);
+      }
+
       console.log('[链接刷新] 获取到新链接');
 
-      // 先停止HLS加载
-      hls.stopLoad();
+      // 链接就绪后再取 media，并在此刻记录进度（换源前最后一刻）
+      const { video, hls } = getPlaybackMedia(preferredHls, preferredVideo);
+      if (!video) {
+        throw new Error('播放器尚未就绪');
+      }
 
-      // 使用HLS的loadSource方法直接加载新链接（不改变videoUrl状态）
-      hls.loadSource(data.url);
+      const currentTime = video.currentTime;
+      const isPaused = video.paused;
+      console.log(
+        `[链接刷新] 换源前记录进度 (${isScheduled ? '定时' : '错误触发'}):`,
+        currentTime
+      );
 
-      // 监听加载完成事件，恢复播放进度
-      const onManifestParsed = () => {
-        // 从指定位置开始加载
-        hls.startLoad(currentTime);
+      // 优先走 HLS 换源；没有 hls 实例时按 progressive 直链处理
+      if (hls && typeof hls.loadSource === 'function') {
+        try {
+          hls.stopLoad();
+        } catch {
+          // ignore
+        }
+        hls.loadSource(data.url);
 
-        // 等待视频可以seek
-        const onLoadedData = () => {
-          video.removeEventListener('loadeddata', onLoadedData);
+        await new Promise<void>((resolve, reject) => {
+          const HlsEvents = (hls.constructor as any).Events;
+          let settled = false;
+          let finished = false;
 
-          // 设置播放位置
-          if (currentTime > 0) {
-            video.currentTime = currentTime;
+          const cleanup = () => {
+            try {
+              hls.off(HlsEvents.MANIFEST_PARSED, onManifestParsed);
+            } catch {
+              // ignore
+            }
+            window.clearTimeout(timeoutId);
+          };
 
-            // 等待seek完成
-            const onSeeked = () => {
-              console.log('[链接刷新] 刷新完成，恢复到:', video.currentTime);
+          const complete = () => {
+            if (finished) return;
+            finished = true;
+            finishLinkRefresh(isScheduled, hls, video);
+            resolve();
+          };
 
-              video.removeEventListener('seeked', onSeeked);
+          const onManifestParsed = () => {
+            if (settled) return;
+            settled = true;
+            cleanup();
 
-              // 恢复播放状态
-              if (!isPaused) {
-                video.play().catch(err => {
-                  console.warn('[链接刷新] 自动播放失败:', err);
-                });
+            try {
+              hls.startLoad(currentTime);
+            } catch {
+              // ignore
+            }
+
+            const restorePlayback = () => {
+              if (currentTime > 0) {
+                try {
+                  video.currentTime = currentTime;
+                } catch {
+                  // ignore
+                }
+              }
+
+              const afterSeek = () => {
+                console.log('[链接刷新] HLS 刷新完成，恢复到:', video.currentTime);
+                if (!isPaused) {
+                  video.play().catch((err) => {
+                    console.warn('[链接刷新] 自动播放失败:', err);
+                  });
+                } else {
+                  video.pause();
+                }
+                complete();
+              };
+
+              if (currentTime > 0) {
+                video.addEventListener('seeked', afterSeek, { once: true });
+                // seeked 偶发不触发时兜底
+                window.setTimeout(() => {
+                  afterSeek();
+                }, 1500);
               } else {
-                // 确保暂停状态
-                video.pause();
+                afterSeek();
               }
-
-              setIsRefreshingUrl(false);
-
-              // 显示提示
-              if (artPlayerRef.current) {
-                artPlayerRef.current.notice.show = isScheduled
-                  ? '链接已自动刷新'
-                  : '链接已过期并自动刷新';
-              }
-
-              // 刷新成功，重置重试计数
-              retryCountRef.current = 0;
-
-              // 重新启动14分钟定时器
-              startRefreshTimer(hls, video);
             };
 
-            video.addEventListener('seeked', onSeeked, { once: true });
-          } else {
-            // 如果是从头开始
+            if (video.readyState >= 2) {
+              restorePlayback();
+            } else {
+              video.addEventListener('loadeddata', restorePlayback, { once: true });
+              window.setTimeout(() => {
+                restorePlayback();
+              }, 3000);
+            }
+          };
+
+          hls.once(HlsEvents.MANIFEST_PARSED, onManifestParsed);
+
+          const timeoutId = window.setTimeout(() => {
+            if (settled) return;
+            settled = true;
+            cleanup();
+            reject(new Error('加载超时'));
+          }, 10000);
+        });
+
+        return true;
+      }
+
+      // progressive / 原生播放：直接换 src 并恢复进度
+      await new Promise<void>((resolve, reject) => {
+        let settled = false;
+        let finished = false;
+        const cleanup = () => {
+          video.removeEventListener('loadeddata', onLoaded);
+          video.removeEventListener('error', onError);
+          window.clearTimeout(timeoutId);
+        };
+
+        const complete = () => {
+          if (finished) return;
+          finished = true;
+          finishLinkRefresh(isScheduled, null, video);
+          resolve();
+        };
+
+        const onLoaded = () => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+
+          if (currentTime > 0) {
+            try {
+              video.currentTime = currentTime;
+            } catch {
+              // ignore
+            }
+          }
+
+          const afterSeek = () => {
+            console.log('[链接刷新] 直链刷新完成，恢复到:', video.currentTime);
             if (!isPaused) {
-              video.play().catch(err => {
+              video.play().catch((err) => {
                 console.warn('[链接刷新] 自动播放失败:', err);
               });
             } else {
-              // 确保暂停状态
               video.pause();
             }
+            complete();
+          };
 
-            setIsRefreshingUrl(false);
-
-            if (artPlayerRef.current) {
-              artPlayerRef.current.notice.show = isScheduled
-                ? '链接已自动刷新'
-                : '链接已过期并自动刷新';
-            }
-
-            retryCountRef.current = 0;
-            startRefreshTimer(hls, video);
+          if (currentTime > 0) {
+            video.addEventListener('seeked', afterSeek, { once: true });
+            window.setTimeout(afterSeek, 1500);
+          } else {
+            afterSeek();
           }
         };
 
-        video.addEventListener('loadeddata', onLoadedData, { once: true });
-      };
+        const onError = () => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          reject(new Error('直链加载失败'));
+        };
 
-      // 使用 hls.constructor.Events 访问事件常量
-      const HlsEvents = (hls.constructor as any).Events;
-      hls.once(HlsEvents.MANIFEST_PARSED, onManifestParsed);
+        video.addEventListener('loadeddata', onLoaded, { once: true });
+        video.addEventListener('error', onError, { once: true });
+        const timeoutId = window.setTimeout(() => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          reject(new Error('加载超时'));
+        }, 10000);
 
-      // 添加超时保护（10秒内未加载完成则认为失败）
-      setTimeout(() => {
-        hls.off(HlsEvents.MANIFEST_PARSED, onManifestParsed);
-        if (isRefreshingUrl) {
-          console.error('[链接刷新] 加载超时');
-          setIsRefreshingUrl(false);
-          throw new Error('加载超时');
+        try {
+          video.src = data.url;
+          video.load();
+        } catch (err) {
+          settled = true;
+          cleanup();
+          reject(err instanceof Error ? err : new Error(String(err)));
         }
-      }, 10000);
+      });
 
       return true;
     } catch (error) {
@@ -3009,8 +3232,8 @@ function PlayPageClient() {
         console.warn('[链接刷新] 定时刷新失败，继续使用旧链接');
         // 5分钟后再试一次
         setTimeout(() => {
-          if (hls && video && currentXiaoyaUrlRef.current) {
-            refreshXiaoyaUrl(hls, video, true);
+          if (currentXiaoyaUrlRef.current && shouldEnableLinkRefresh()) {
+            refreshXiaoyaUrl(undefined, undefined, true);
           }
         }, 5 * 60 * 1000);
         return false;
@@ -3020,13 +3243,18 @@ function PlayPageClient() {
       if (retryCountRef.current < 3) {
         console.log(`[链接刷新] 2秒后重试 (${retryCountRef.current}/3)`);
         setTimeout(() => {
-          if (hls && video && currentXiaoyaUrlRef.current) {
-            refreshXiaoyaUrl(hls, video, false);
+          if (currentXiaoyaUrlRef.current && shouldEnableLinkRefresh()) {
+            refreshXiaoyaUrl(undefined, undefined, false);
           }
         }, 2000);
       } else {
         setVideoError('链接刷新失败，请手动刷新页面');
-        hls.destroy();
+        const { hls } = getPlaybackMedia(preferredHls, preferredVideo);
+        try {
+          hls?.destroy?.();
+        } catch {
+          // ignore
+        }
       }
 
       return false;
@@ -3035,17 +3263,43 @@ function PlayPageClient() {
 
   /**
    * 启动14分钟定时刷新器
+   * xiaoya：始终启用；openlist：仅当 detail.refresh14m 为 true
+   * 不依赖 hls 是否已就绪；到期时再取当前播放器实例
    */
-  const startRefreshTimer = (hls: any, video: HTMLVideoElement) => {
+  const startRefreshTimer = (preferredHls?: any, preferredVideo?: HTMLVideoElement) => {
     // 清除旧定时器
     if (refreshTimerRef.current) {
       clearTimeout(refreshTimerRef.current);
       refreshTimerRef.current = null;
     }
 
-    // 只对xiaoya源启动定时器
+    // 无原始可刷新 URL 则跳过
     if (!currentXiaoyaUrlRef.current) {
       return;
+    }
+
+    if (!shouldEnableLinkRefresh()) {
+      const isOpenlistPlayUrl = currentXiaoyaUrlRef.current.startsWith(
+        '/api/openlist/play'
+      );
+      if (isOpenlistPlayUrl) {
+        console.log('[定时刷新] OpenList 路径未开启 refresh14m，跳过');
+      }
+      linkRefreshEligibleRef.current = false;
+      return;
+    }
+
+    // xiaoya：仅 m3u8 可启（由 shouldStartLinkRefreshTimer 写入 eligible）
+    // openlist：eligible 在 refresh14m 判定时已置 true
+    const isOpenlistPlayUrl = currentXiaoyaUrlRef.current.startsWith(
+      '/api/openlist/play'
+    );
+    if (!isOpenlistPlayUrl && !linkRefreshEligibleRef.current) {
+      console.log('[定时刷新] xiaoya 非 m3u8，跳过定时器（保持原逻辑）');
+      return;
+    }
+    if (isOpenlistPlayUrl) {
+      linkRefreshEligibleRef.current = true;
     }
 
     console.log('[定时刷新] 启动14分钟定时器');
@@ -3053,9 +3307,11 @@ function PlayPageClient() {
     // 14分钟 = 840000毫秒
     refreshTimerRef.current = setTimeout(() => {
       console.log('[定时刷新] 14分钟到期，开始刷新');
-      if (hls && video && currentXiaoyaUrlRef.current) {
-        refreshXiaoyaUrl(hls, video, true);
+      if (!currentXiaoyaUrlRef.current || !shouldEnableLinkRefresh()) {
+        return;
       }
+      // 优先用调用时传入的实例，否则从当前播放器取
+      refreshXiaoyaUrl(preferredHls, preferredVideo, true);
     }, 14 * 60 * 1000);
   };
 
@@ -3079,6 +3335,7 @@ function PlayPageClient() {
     retryCountRef.current = 0;
     lastRefreshTimeRef.current = 0;
     currentXiaoyaUrlRef.current = ''; // 清空旧的原始URL
+    linkRefreshEligibleRef.current = false;
     clearRefreshTimer(); // 清除旧的定时器
     isInitialLoadRef.current = true; // 重置为首次加载
 
@@ -3098,8 +3355,10 @@ function PlayPageClient() {
     ) {
       // 这类源统一先走详情懒加载，如果 episodes 为空则跳过
       if (isLazyDetailSource(detailData?.source) && (!detailData?.episodes || detailData.episodes.length === 0)) {
+        setPlaybackSourceBadge(null);
         return;
       }
+      setPlaybackSourceBadge(null);
       setVideoUrl('');
       return;
     }
@@ -3110,6 +3369,7 @@ function PlayPageClient() {
     const requestSeq = ++videoUrlRequestSeqRef.current;
 
     let newUrl = detailData?.episodes[episodeIndex] || '';
+    let nextPlaybackSourceBadge: PlaybackSourceBadge = null;
     const isXiaoyaLazyPlayUrl = newUrl.startsWith('/api/xiaoya/play');
 
     if (isEpisodeSwitchRequest && isXiaoyaLazyPlayUrl) {
@@ -3147,9 +3407,14 @@ function PlayPageClient() {
 
     if (isSpecialLazyPlayUrl) {
       try {
-        // 保存原始URL（用于后续刷新）
-        if (newUrl.startsWith('/api/xiaoya/play') || newUrl.startsWith('/api/openlist/play')) {
-          currentXiaoyaUrlRef.current = newUrl;
+        // 保存原始 lazy URL（用于后续刷新）
+        // xiaoya：始终可刷新；openlist：先保存，再以 play 响应的 refresh14m 最终裁定
+        const originalLazyUrl = newUrl;
+        if (
+          originalLazyUrl.startsWith('/api/xiaoya/play') ||
+          originalLazyUrl.startsWith('/api/openlist/play')
+        ) {
+          currentXiaoyaUrlRef.current = originalLazyUrl;
         }
 
         // 添加 format=json 参数
@@ -3163,12 +3428,40 @@ function PlayPageClient() {
         }
         if (data.url) {
           newUrl = data.url;
+          // play 响应可带回 refresh14m，覆盖 detail（配置热更新后仍一致）
+          if (originalLazyUrl.startsWith('/api/openlist/play')) {
+            const refresh14m =
+              typeof data.refresh14m === 'boolean'
+                ? data.refresh14m
+                : Boolean(detailData?.refresh14m);
+            if (detailData) {
+              detailData.refresh14m = refresh14m;
+            }
+            if (detailRef.current?.source === 'openlist') {
+              detailRef.current.refresh14m = refresh14m;
+            }
+            // 未开启续期时清空，避免误启定时器
+            currentXiaoyaUrlRef.current = refresh14m ? originalLazyUrl : '';
+          }
           // 保存清晰度列表
           if (data.qualities && data.qualities.length > 0) {
             setVideoQualities(data.qualities);
           } else {
             setVideoQualities([]);
           }
+
+          // 拿到真实播放地址后立刻启动 14 分钟续期（避免仅依赖 MANIFEST_PARSED）
+          // xiaoya：仅 m3u8；openlist：refresh14m 即可（签名链常无扩展名）
+          if (
+            currentXiaoyaUrlRef.current &&
+            shouldStartLinkRefreshTimer(newUrl)
+          ) {
+            isInitialLoadRef.current = false;
+            startRefreshTimer();
+          }
+        } else if (originalLazyUrl.startsWith('/api/openlist/play')) {
+          // 未拿到 url 时不保留 lazy url，避免无效续期
+          currentXiaoyaUrlRef.current = '';
         }
       } catch (error) {
         if (requestSeq !== videoUrlRequestSeqRef.current) {
@@ -3198,6 +3491,7 @@ function PlayPageClient() {
     if (fileSystemCheck.hasLocal && fileSystemCheck.dirHandle) {
       // 使用本地文件播放
       try {
+        cleanupLocalPlaybackBlobUrls();
         // 读取 m3u8 文件
         const fileHandle = await fileSystemCheck.dirHandle.getFileHandle('playlist.m3u8', { create: false });
         const file = await fileHandle.getFile();
@@ -3251,6 +3545,7 @@ function PlayPageClient() {
         const modifiedContent = modifiedLines.join('\n');
         const m3u8Blob = new Blob([modifiedContent], { type: 'application/vnd.apple.mpegurl' });
         newUrl = URL.createObjectURL(m3u8Blob);
+        nextPlaybackSourceBadge = 'local';
 
         // 保存 Blob URLs 到 window，以便在切换视频时清理
         (window as any).__localFileBlobUrls = blobUrls;
@@ -3261,8 +3556,37 @@ function PlayPageClient() {
       }
     }
 
-    // 如果没有 File System API 本地文件，检查服务器端本地下载
-    if (!fileSystemCheck.hasLocal) {
+    let indexedDBCheck: Awaited<ReturnType<typeof getIndexedDBVideoPlaybackUrl>> = { hasLocal: false };
+
+    // 如果没有 File System API 本地文件，检查 IndexedDB 应用内离线缓存
+    if (!fileSystemCheck.hasLocal && currentSource && currentId) {
+      indexedDBCheck = await getIndexedDBVideoPlaybackUrl(
+        currentSource,
+        currentId,
+        episodeIndex,
+        { preferServiceWorker: true }
+      );
+      if (requestSeq !== videoUrlRequestSeqRef.current) {
+        indexedDBCheck.objectUrls?.forEach((url) => URL.revokeObjectURL(url));
+        return;
+      }
+
+      if (indexedDBCheck.hasLocal && indexedDBCheck.url) {
+        cleanupLocalPlaybackBlobUrls();
+        if (indexedDBCheck.objectUrls?.length) {
+          (window as any).__localFileBlobUrls = indexedDBCheck.objectUrls;
+        }
+        newUrl = indexedDBCheck.url;
+        nextPlaybackSourceBadge = 'local';
+        console.log(
+          `使用 IndexedDB 本地缓存播放（${indexedDBCheck.mode === 'service-worker' ? 'Service Worker' : 'Blob 降级'} 模式）:`,
+          episodeTitle
+        );
+      }
+    }
+
+    // 如果没有 File System API / IndexedDB 本地文件，检查服务器端本地下载
+    if (!fileSystemCheck.hasLocal && !indexedDBCheck.hasLocal) {
       const hasLocalFile = await checkLocalDownload(currentSource, currentId, episodeIndex);
       if (requestSeq !== videoUrlRequestSeqRef.current) {
         return;
@@ -3271,6 +3595,7 @@ function PlayPageClient() {
       if (hasLocalFile) {
         // 使用本地代理接口,URL以.m3u8结尾以便Artplayer自动识别
         newUrl = `/api/offline-download/local/${currentSource}/${currentId}/${episodeIndex}/playlist.m3u8`;
+        nextPlaybackSourceBadge = 'offline';
         console.log('使用服务器端本地下载文件播放:', newUrl);
       } else {
         const isM3u8 = newUrl.toLowerCase().includes('.m3u') || !newUrl.toLowerCase().match(/\.(mp4|flv|webm|mkv|avi|mov)(\?.*)?$/);
@@ -3300,6 +3625,7 @@ function PlayPageClient() {
       }
       setVideoUrl(newUrl);
     }
+    setPlaybackSourceBadge(nextPlaybackSourceBadge);
   };
 
   // 处理下载指定集数（支持批量下载）
@@ -6894,9 +7220,14 @@ function PlayPageClient() {
                   }
                 }
 
-                // 只在首次加载时启动定时器（后续刷新会在refreshXiaoyaUrl中启动）
-                if (isInitialLoadRef.current && currentXiaoyaUrlRef.current && url.includes('.m3u8')) {
-                  isInitialLoadRef.current = false; // 标记已完成首次加载
+                // 兜底：若 updateVideoUrl 时尚未启定时器，在 manifest 解析后再启
+                // xiaoya：仅 m3u8；openlist：refresh14m 即可（此回调本身已在 HLS 路径）
+                if (
+                  isInitialLoadRef.current &&
+                  currentXiaoyaUrlRef.current &&
+                  shouldStartLinkRefreshTimer(url)
+                ) {
+                  isInitialLoadRef.current = false;
                   startRefreshTimer(hls, video);
                 }
               });
@@ -8683,6 +9014,12 @@ function PlayPageClient() {
           // 条件：当前播放时间 < 10秒 且 播放记录时间 > 10秒
           const checkPlayRecordJump = async () => {
             try {
+              // 短剧不显示"上次播放到"提示（短剧单集太短，提示意义不大）
+              if (searchParams.get('duanju') === '1') {
+                playRecordJumpInitialCheckRef.current = false;
+                return;
+              }
+
               // 仅在进入播放后的首次检查时处理，避免本次会话新生成的记录触发恢复按钮
               if (!playRecordJumpInitialCheckRef.current) {
                 return;
@@ -8926,9 +9263,9 @@ function PlayPageClient() {
               setVideoError('视频无法在浏览器中播放（已尝试代理，格式不兼容）');
             } else if (currentSourceRef.current === 'directplay' && !currentUrl.includes('/api/proxy-m3u8')) {
               setCorsFailedUrl(currentUrl);
-              setVideoError('视频播放失败（格式不支持或跨域限制）');
+              setVideoError('视频播放失败');
             } else {
-              setVideoError('视频播放失败（格式不支持或跨域限制）');
+              setVideoError('视频播放失败');
             }
           }
         });
@@ -9498,6 +9835,11 @@ function PlayPageClient() {
                 </span>
               );
             })()}
+            {playbackSourceBadge && (
+              <span className='inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-orange-100 text-orange-800 dark:bg-orange-900/30 dark:text-orange-300'>
+                {playbackSourceBadge === 'local' ? '本地播放' : '离线播放'}
+              </span>
+            )}
           </h1>
         </div>
         {/* 第二行：播放器和选集 */}
@@ -9657,11 +9999,11 @@ function PlayPageClient() {
                   </div>
                 )}
 
-                {/* 链接刷新提示 */}
+                {/* 链接刷新提示（右上角，无遮罩） */}
                 {isRefreshingUrl && (
-                  <div className='absolute inset-0 flex items-center justify-center bg-black/50 z-50 pointer-events-none'>
-                    <div className='bg-black/80 text-white px-6 py-3 rounded-lg flex items-center gap-3 backdrop-blur-sm border border-green-500/30'>
-                      <svg className='animate-spin h-5 w-5' viewBox='0 0 24 24'>
+                  <div className='absolute top-3 right-3 z-50 pointer-events-none'>
+                    <div className='bg-black/70 text-white px-3 py-1.5 rounded-md flex items-center gap-2 text-sm border border-green-500/30 shadow-lg'>
+                      <svg className='animate-spin h-4 w-4' viewBox='0 0 24 24'>
                         <circle className='opacity-25' cx='12' cy='12' r='10' stroke='currentColor' strokeWidth='4' fill='none' />
                         <path className='opacity-75' fill='currentColor' d='M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z' />
                       </svg>

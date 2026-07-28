@@ -2,6 +2,7 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 
+import { invalidateDeviceAccessToken } from '@/lib/access-token-invalidation';
 import { getAuthInfoFromCookie } from '@/lib/auth';
 import { getConfig } from '@/lib/config';
 import { db, getStorage } from '@/lib/db';
@@ -156,6 +157,7 @@ export async function DELETE(request: NextRequest) {
       );
     }
 
+    invalidateDeviceAccessToken(targetUsername, tokenId);
     await revokeRefreshToken(targetUsername, tokenId);
     const storage = getStorage();
     await storage.deletePushSubscriptionsByTokenId?.(targetUsername, tokenId);

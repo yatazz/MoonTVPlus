@@ -2093,7 +2093,10 @@ export default function MusicClient({ children: _children }: { children?: React.
         </div>
       )}
       {/* Header */}
-      <header className="fixed top-0 left-0 right-0 z-40 bg-zinc-950/95 backdrop-blur-md border-b border-white/10 px-4 md:px-6">
+      <header
+        className="fixed top-0 left-0 right-0 z-40 bg-zinc-950/95 backdrop-blur-md border-b border-white/10 px-4 md:px-6"
+        style={{ paddingTop: 'env(safe-area-inset-top)' }}
+      >
         <div className="w-full mx-auto flex items-center justify-between gap-3 md:gap-4 py-3">
           <div className="flex items-center justify-between md:justify-start md:gap-6 w-full md:w-auto">
             <div className="flex items-center gap-3">
@@ -2118,7 +2121,7 @@ export default function MusicClient({ children: _children }: { children?: React.
       </header>
 
       {/* Main Content */}
-      <main className="pt-[80px] md:pt-[76px] pb-32 px-4 md:px-6">
+      <main className="pt-[calc(80px+env(safe-area-inset-top))] md:pt-[calc(76px+env(safe-area-inset-top))] pb-32 px-4 md:px-6">
         <div className="max-w-7xl mx-auto">
           {_children}
         </div>

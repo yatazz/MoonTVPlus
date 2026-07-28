@@ -24,12 +24,22 @@ function QrLoginClient() {
     });
     const data = await res.json();
     setLoading(false);
-    setMessage(res.ok ? '确认成功，请回到电视查看。' : data.error || '确认失败');
+    if (res.ok) {
+      setMessage('确认成功，正在返回上一页...');
+      window.setTimeout(() => {
+        window.history.back();
+      }, 700);
+      return;
+    }
+    setMessage(data.error || '确认失败');
   };
 
   const cancel = async () => {
     await fetch('/api/auth/qr/cancel', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token }) });
-    setMessage('已取消本次电视登录。');
+    setMessage('已取消本次电视登录，正在返回上一页...');
+    window.setTimeout(() => {
+      window.history.back();
+    }, 500);
   };
 
   return (

@@ -27,7 +27,7 @@ import {
   MusicV2PlaylistItem,
   MusicV2PlaylistRecord,
 } from './music-v2';
-import { dispatchWebPushNotification } from './web-push';
+import { dispatchNotificationChannels } from './notification-dispatch';
 
 /**
  * Vercel Postgres 存储实现
@@ -3064,7 +3064,7 @@ export class PostgresStorage implements IStorage {
         )
         .run();
 
-      await dispatchWebPushNotification(this, userName, notification);
+      await dispatchNotificationChannels(this, userName, notification);
     } catch (err) {
       console.error('PostgresStorage.addNotification error:', err);
       throw err;
@@ -3461,6 +3461,138 @@ export class PostgresStorage implements IStorage {
       console.error('PostgresStorage.deleteGlobalValue error:', err);
       throw err;
     }
+  }
+
+
+  private mapTelegramBinding(row: any): import('./types').TelegramBindingRecord {
+    return {
+      username: row.username as string,
+      telegramUserId: String(row.telegram_user_id),
+      chatId: String(row.chat_id),
+      telegramUsername: (row.telegram_username as string | null) || null,
+      firstName: (row.first_name as string | null) || null,
+      lastName: (row.last_name as string | null) || null,
+      notificationsEnabled: row.notifications_enabled === 1 || row.notifications_enabled === true,
+      boundAt: Number(row.bound_at),
+      updatedAt: Number(row.updated_at),
+    };
+  }
+
+  async getTelegramBinding(userName: string): Promise<import('./types').TelegramBindingRecord | null> {
+    try {
+      const row = await this.db
+        .prepare('SELECT * FROM telegram_bindings WHERE username = $1')
+        .bind(userName)
+        .first();
+      return row ? this.mapTelegramBinding(row) : null;
+    } catch (err) {
+      console.error('PostgresStorage.getTelegramBinding error:', err);
+      return null;
+    }
+  }
+
+  async getTelegramBindingByTelegramUserId(telegramUserId: string): Promise<import('./types').TelegramBindingRecord | null> {
+    try {
+      const row = await this.db
+        .prepare('SELECT * FROM telegram_bindings WHERE telegram_user_id = $1')
+        .bind(telegramUserId)
+        .first();
+      return row ? this.mapTelegramBinding(row) : null;
+    } catch (err) {
+      console.error('PostgresStorage.getTelegramBindingByTelegramUserId error:', err);
+      return null;
+    }
+  }
+
+  async upsertTelegramBinding(binding: import('./types').TelegramBindingRecord): Promise<void> {
+    try {
+      await this.db
+        .prepare(`
+          INSERT INTO telegram_bindings (
+            username, telegram_user_id, chat_id, telegram_username, first_name, last_name,
+            notifications_enabled, bound_at, updated_at
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+          ON CONFLICT(username) DO UPDATE SET
+            telegram_user_id = EXCLUDED.telegram_user_id,
+            chat_id = EXCLUDED.chat_id,
+            telegram_username = EXCLUDED.telegram_username,
+            first_name = EXCLUDED.first_name,
+            last_name = EXCLUDED.last_name,
+            notifications_enabled = EXCLUDED.notifications_enabled,
+            bound_at = EXCLUDED.bound_at,
+            updated_at = EXCLUDED.updated_at
+        `)
+        .bind(
+          binding.username,
+          binding.telegramUserId,
+          binding.chatId,
+          binding.telegramUsername || null,
+          binding.firstName || null,
+          binding.lastName || null,
+          binding.notificationsEnabled ? 1 : 0,
+          binding.boundAt,
+          binding.updatedAt
+        )
+        .run();
+    } catch (err) {
+      console.error('PostgresStorage.upsertTelegramBinding error:', err);
+      throw err;
+    }
+  }
+
+  async deleteTelegramBindingByUsername(userName: string): Promise<void> {
+    await this.db.prepare('DELETE FROM telegram_bindings WHERE username = $1').bind(userName).run();
+  }
+
+  async deleteTelegramBindingByTelegramUserId(telegramUserId: string): Promise<void> {
+    await this.db.prepare('DELETE FROM telegram_bindings WHERE telegram_user_id = $1').bind(telegramUserId).run();
+  }
+
+  async getTelegramBindSession(code: string): Promise<import('./types').TelegramBindSessionRecord | null> {
+    try {
+      const row = await this.db
+        .prepare('SELECT * FROM telegram_bind_sessions WHERE code = $1')
+        .bind(code)
+        .first();
+      if (!row) return null;
+      return {
+        code: row.code as string,
+        username: row.username as string,
+        createdAt: Number(row.created_at),
+        expiresAt: Number(row.expires_at),
+        used: row.used === 1 || row.used === true,
+      };
+    } catch (err) {
+      console.error('PostgresStorage.getTelegramBindSession error:', err);
+      return null;
+    }
+  }
+
+  async upsertTelegramBindSession(session: import('./types').TelegramBindSessionRecord): Promise<void> {
+    try {
+      await this.db
+        .prepare(`
+          INSERT INTO telegram_bind_sessions (code, username, created_at, expires_at, used)
+          VALUES ($1, $2, $3, $4, $5)
+          ON CONFLICT(code) DO UPDATE SET
+            username = EXCLUDED.username,
+            created_at = EXCLUDED.created_at,
+            expires_at = EXCLUDED.expires_at,
+            used = EXCLUDED.used
+        `)
+        .bind(session.code, session.username, session.createdAt, session.expiresAt, session.used ? 1 : 0)
+        .run();
+    } catch (err) {
+      console.error('PostgresStorage.upsertTelegramBindSession error:', err);
+      throw err;
+    }
+  }
+
+  async markTelegramBindSessionUsed(code: string): Promise<void> {
+    await this.db
+      .prepare('UPDATE telegram_bind_sessions SET used = 1 WHERE code = $1')
+      .bind(code)
+      .run();
   }
 
   async getLastFavoriteCheckTime(userName: string): Promise<number> {

@@ -1,5 +1,6 @@
 'use client';
 
+import { useRouter } from 'next/navigation';
 import { useEffect, useState } from 'react';
 
 import { BackButton } from './BackButton';
@@ -18,8 +19,14 @@ interface PageLayoutProps {
 }
 
 const PageLayout = ({ children, activePath = '/', hideNavigation = false }: PageLayoutProps) => {
+  const router = useRouter();
   const [backgroundImage, setBackgroundImage] = useState('');
   const shouldShowSharedBackground = !hideNavigation && activePath !== '/play';
+
+  useEffect(() => {
+    router.prefetch('/search');
+    router.prefetch('/play');
+  }, [router]);
 
   useEffect(() => {
     if (typeof window === 'undefined' || !shouldShowSharedBackground) {
@@ -100,7 +107,7 @@ const PageLayout = ({ children, activePath = '/', hideNavigation = false }: Page
 
             {/* 主内容 */}
             <main
-              className='flex-1 md:min-h-0 mb-14 md:mb-0 md:mt-0 mt-12'
+              className='flex-1 md:min-h-0 mb-14 md:mb-0 md:mt-0 mt-[calc(3rem+env(safe-area-inset-top))]'
               style={{
                 paddingBottom: 'calc(3.5rem + env(safe-area-inset-bottom))',
               }}

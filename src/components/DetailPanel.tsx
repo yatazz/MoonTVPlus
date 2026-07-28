@@ -16,7 +16,7 @@ import Image from 'next/image';
 import React, { useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 
-import { getBangumiSubject } from '@/lib/bangumi.client';
+import { getBangumiSubject, getBangumiSubjectUrl } from '@/lib/bangumi.client';
 import { appendSpecialSourceParam } from '@/lib/special-source.client';
 import { getTMDBImageUrl } from '@/lib/tmdb.client';
 import { processImageUrl } from '@/lib/utils';
@@ -159,7 +159,7 @@ const DetailPanel: React.FC<DetailPanelProps> = ({
     if (currentSource === 'bangumi') {
       const actualBangumiId = bangumiId || doubanId;
       if (actualBangumiId) {
-        return `https://bgm.tv/subject/${actualBangumiId}`;
+        return getBangumiSubjectUrl(actualBangumiId);
       }
     }
 

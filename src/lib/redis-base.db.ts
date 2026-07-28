@@ -11,7 +11,7 @@ import {
 import { RedisAdapter } from './redis-adapter';
 import { Favorite, IStorage, Notification, PlayRecord, PushSubscriptionRecord, SkipConfig } from './types';
 import { userInfoCache } from './user-cache';
-import { dispatchWebPushNotification } from './web-push';
+import { dispatchNotificationChannels } from './notification-dispatch';
 
 // 搜索历史最大条数
 const SEARCH_HISTORY_LIMIT = 20;
@@ -2098,6 +2098,65 @@ export abstract class BaseRedisStorage implements IStorage {
     await this.withRetry(() => this.adapter.del(this.globalValueKey(key)));
   }
 
+
+  private telegramBindingKey(userName: string) {
+    return `telegram:binding:user:${userName}`;
+  }
+
+  private telegramUserBindingKey(telegramUserId: string) {
+    return `telegram:binding:tg:${telegramUserId}`;
+  }
+
+  private telegramBindSessionKey(code: string) {
+    return `telegram:bind:${code}`;
+  }
+
+  async getTelegramBinding(userName: string): Promise<import('./types').TelegramBindingRecord | null> {
+    const raw = await this.withRetry(() => this.adapter.get(this.telegramBindingKey(userName)));
+    return raw ? (JSON.parse(ensureString(raw)) as import('./types').TelegramBindingRecord) : null;
+  }
+
+  async getTelegramBindingByTelegramUserId(telegramUserId: string): Promise<import('./types').TelegramBindingRecord | null> {
+    const userName = await this.withRetry(() => this.adapter.get(this.telegramUserBindingKey(telegramUserId)));
+    return userName ? this.getTelegramBinding(ensureString(userName)) : null;
+  }
+
+  async upsertTelegramBinding(binding: import('./types').TelegramBindingRecord): Promise<void> {
+    await this.withRetry(() => this.adapter.set(this.telegramBindingKey(binding.username), JSON.stringify(binding)));
+    await this.withRetry(() => this.adapter.set(this.telegramUserBindingKey(binding.telegramUserId), binding.username));
+  }
+
+  async deleteTelegramBindingByUsername(userName: string): Promise<void> {
+    const binding = await this.getTelegramBinding(userName);
+    await this.withRetry(() => this.adapter.del(this.telegramBindingKey(userName)));
+    if (binding) {
+      await this.withRetry(() => this.adapter.del(this.telegramUserBindingKey(binding.telegramUserId)));
+    }
+  }
+
+  async deleteTelegramBindingByTelegramUserId(telegramUserId: string): Promise<void> {
+    const binding = await this.getTelegramBindingByTelegramUserId(telegramUserId);
+    if (binding) {
+      await this.withRetry(() => this.adapter.del(this.telegramBindingKey(binding.username)));
+    }
+    await this.withRetry(() => this.adapter.del(this.telegramUserBindingKey(telegramUserId)));
+  }
+
+  async getTelegramBindSession(code: string): Promise<import('./types').TelegramBindSessionRecord | null> {
+    const raw = await this.withRetry(() => this.adapter.get(this.telegramBindSessionKey(code)));
+    return raw ? (JSON.parse(ensureString(raw)) as import('./types').TelegramBindSessionRecord) : null;
+  }
+
+  async upsertTelegramBindSession(session: import('./types').TelegramBindSessionRecord): Promise<void> {
+    await this.withRetry(() => this.adapter.set(this.telegramBindSessionKey(session.code), JSON.stringify(session)));
+  }
+
+  async markTelegramBindSessionUsed(code: string): Promise<void> {
+    const session = await this.getTelegramBindSession(code);
+    if (!session) return;
+    await this.upsertTelegramBindSession({ ...session, used: true });
+  }
+
   // ---------- 通知相关 ----------
   private notificationsKey(userName: string) {
     return `u:${userName}:notifications`;
@@ -2133,7 +2192,7 @@ export abstract class BaseRedisStorage implements IStorage {
       )
     );
 
-    await dispatchWebPushNotification(this, userName, notification);
+    await dispatchNotificationChannels(this, userName, notification);
   }
 
   async markNotificationAsRead(

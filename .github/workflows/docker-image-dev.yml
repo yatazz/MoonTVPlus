@@ -6,14 +6,12 @@ on:
       tag:
         description: '手动指定 Docker 标签'
         required: false
-        # dev 分支手动触发时，默认 tag 为 dev
+        # 手动触发时，默认 tag 为 dev
         default: 'dev'
         type: string
-  push:
-    # 监听 dev 分支的推送
-    branches: [ dev ]
-  # 取消了 pull_request 触发，因为它通常不应该触发构建和推送镜像的操作
-  # 如果确实需要，可以重新加回来
+  # 已移除 push 到 dev 分支时的自动构建，仅保留手动触发
+  # push:
+  #   branches: [ dev ]
   # pull_request:
   #   branches: [ dev ]
 

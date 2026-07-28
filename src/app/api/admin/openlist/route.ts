@@ -6,6 +6,11 @@ import { getAuthInfoFromCookie } from '@/lib/auth';
 import { getConfig } from '@/lib/config';
 import { db } from '@/lib/db';
 import { OpenListClient } from '@/lib/openlist.client';
+import {
+  normalizeOpenListPath,
+  normalizePathMetaMap,
+  type OpenListPathMetaMap,
+} from '@/lib/openlist-path-meta';
 
 export const runtime = 'nodejs';
 
@@ -13,19 +18,14 @@ export const runtime = 'nodejs';
  * 清理字符串中的 BOM 和其他不可见字符
  */
 function cleanPath(path: string): string {
-  // 移除 UTF-8 BOM (U+FEFF) 和其他零宽度字符
-  let cleaned = path
-    .replace(/^\uFEFF/, '') // 移除开头的 BOM
-    .replace(/\uFEFF/g, '') // 移除所有 BOM
-    .replace(/[\u200B-\u200D\uFEFF]/g, '') // 移除零宽度字符
-    .trim(); // 移除首尾空白
+  return normalizeOpenListPath(path);
+}
 
-  // 移除末尾的 /（除非路径就是 /）
-  if (cleaned.length > 1 && cleaned.endsWith('/')) {
-    cleaned = cleaned.slice(0, -1);
+function parsePathMeta(raw: unknown): OpenListPathMetaMap {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return {};
   }
-
-  return cleaned;
+  return normalizePathMetaMap(raw as OpenListPathMetaMap);
 }
 
 /**
@@ -60,6 +60,7 @@ export async function POST(request: NextRequest) {
       ScanInterval,
       ScanMode,
       DisableVideoPreview,
+      PathMeta,
     } = body;
 
     const authInfo = getAuthInfoFromCookie(request);
@@ -80,6 +81,8 @@ export async function POST(request: NextRequest) {
     }
 
     if (action === 'save') {
+      const cleanedPathMeta = parsePathMeta(PathMeta);
+
       // 如果功能未启用，允许保存空配置
       if (!Enabled) {
         adminConfig.OpenListConfig = {
@@ -98,6 +101,7 @@ export async function POST(request: NextRequest) {
           ScanInterval: 0,
           ScanMode: ScanMode || 'hybrid',
           DisableVideoPreview: DisableVideoPreview || false,
+          PathMeta: cleanedPathMeta,
         };
 
         await db.saveAdminConfig(adminConfig);
@@ -193,6 +197,7 @@ export async function POST(request: NextRequest) {
         ScanInterval: scanInterval,
         ScanMode: ScanMode || 'hybrid',
         DisableVideoPreview: DisableVideoPreview || false,
+        PathMeta: cleanedPathMeta,
       };
 
       await db.saveAdminConfig(adminConfig);

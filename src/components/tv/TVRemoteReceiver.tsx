@@ -14,6 +14,7 @@ import type {
 } from '@/lib/tv-remote-types';
 
 const DEVICE_ID_KEY = 'moontv_tv_remote_device_id';
+const LOCAL_REMOTE_URL_KEY = 'moontv_local_remote_url';
 
 type TVRemoteReceiverSingleton = {
   socket: Socket | null;
@@ -49,8 +50,50 @@ function getDeviceName() {
 
 export default function TVRemoteReceiver() {
   useEffect(() => {
+    const syncLocalRemoteUrl = () => {
+      const hash = window.location.hash || '';
+      const match = hash.match(/(?:^|[#&])localRemoteUrl=([^&]+)/);
+      if (!match?.[1]) return;
+
+      try {
+        const url = decodeURIComponent(match[1]);
+        if (url.startsWith('http://') || url.startsWith('https://')) {
+          localStorage.setItem(LOCAL_REMOTE_URL_KEY, url);
+          window.__MOONTV_LOCAL_REMOTE_URL = url;
+          window.dispatchEvent(new CustomEvent('moontv:local-remote-info', {
+            detail: { url },
+          }));
+        }
+      } catch {}
+    };
+
+    const onLocalRemoteKey = (event: Event) => {
+      const detail = (event as CustomEvent<TVRemoteKeyCommand>).detail;
+      if (detail?.key) {
+        fireTVRemoteKey(detail);
+      }
+    };
+
+    const onLocalRemoteText = (event: Event) => {
+      const detail = (event as CustomEvent<TVRemoteTextCommand>).detail;
+      if (detail?.mode) {
+        applyTVRemoteText(detail);
+      }
+    };
+
+    syncLocalRemoteUrl();
+    window.addEventListener('hashchange', syncLocalRemoteUrl);
+    window.addEventListener('moontv:local-remote-key', onLocalRemoteKey);
+    window.addEventListener('moontv:local-remote-text', onLocalRemoteText);
+
     const auth = getAuthInfoFromBrowserCookie();
-    if (!auth?.username) return;
+    if (!auth?.username) {
+      return () => {
+        window.removeEventListener('hashchange', syncLocalRemoteUrl);
+        window.removeEventListener('moontv:local-remote-key', onLocalRemoteKey);
+        window.removeEventListener('moontv:local-remote-text', onLocalRemoteText);
+      };
+    }
 
     receiverState.refCount += 1;
     if (receiverState.disconnectTimer) {
@@ -116,6 +159,9 @@ export default function TVRemoteReceiver() {
       window.clearInterval(interval);
       document.removeEventListener('visibilitychange', onVisibilityChange);
       window.removeEventListener('focus', updateState);
+      window.removeEventListener('hashchange', syncLocalRemoteUrl);
+      window.removeEventListener('moontv:local-remote-key', onLocalRemoteKey);
+      window.removeEventListener('moontv:local-remote-text', onLocalRemoteText);
       socket.off('connect', register);
       socket.off('tv-remote:key');
       socket.off('tv-remote:text');

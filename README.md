@@ -84,11 +84,11 @@
 | 语言      | TypeScript 4                                                 |
 | 播放器    | [ArtPlayer](https://github.com/zhw2590582/ArtPlayer) · [HLS.js](https://github.com/video-dev/hls.js/) |
 | 代码质量  | ESLint · Prettier · Jest                                     |
-| 部署      | Docker                                                       |
+| 部署      | Docker · Vercel · Netlify · Cloudflare Workers · EdgeOne Pages |
 
 ## 部署
 
-本项目**支持 Docker、Vercel、Netlify 和 Cloudflare Workers 平台** 部署。
+本项目**支持 Docker、Vercel、Netlify、Cloudflare Workers 和 EdgeOne Pages 平台** 部署。
 
 [![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https://github.com/mtvpls/MoonTVPlus)
 
@@ -193,6 +193,66 @@ on:
 **7. 配置外部定时任务（可选）**
 
 可使用外部定时请求/api/cron/mtvpls端点以触发定时任务，或新建一个workers请求触发，推荐每小时请求一次。
+
+---
+
+### EdgeOne Pages 部署（通过 GitHub Actions）
+
+EdgeOne Pages/Makers 支持通过 API Token 在 GitHub Actions 中自动构建并部署，本项目已内置 `.github/workflows/edgeone-deploy.yml`。
+
+#### 前置要求
+
+1. 一个腾讯云 EdgeOne 账号
+2. Fork 本项目到你的 GitHub 账号
+3. 准备一个 Turso 数据库实例（推荐，免费 SQLite 云数据库）或 Upstash Redis 实例
+4. 准备 EdgeOne API Token
+
+#### 配置步骤
+
+**1. 获取 EdgeOne API Token**
+
+- 进入 EdgeOne Pages/Makers 控制台
+- 在账号或 API Token 相关页面创建用于 CI/CD 的 Token
+- 复制生成的 Token，后续填入 GitHub Secrets
+
+**2. 配置 GitHub Secrets**
+
+进入你 Fork 的仓库，点击 Settings > Secrets and variables > Actions > New repository secret，添加以下必需的 Secrets：
+
+| Secret 名称                | 说明                | 示例值                   |
+| -------------------------- | ------------------- | ------------------------ |
+| `EDGEONE_API_TOKEN`        | EdgeOne API Token   | `your_edgeone_token`     |
+| `USERNAME`                 | 站长账号            | `admin`                  |
+| `PASSWORD`                 | 站长密码            | `your_secure_password`   |
+| `NEXT_PUBLIC_STORAGE_TYPE` | 存储类型            | `turso` 或 `upstash`     |
+
+**使用 Turso（推荐）：**
+
+在 [Turso](https://turso.tech/) 注册账号并创建数据库，然后运行 `pnpm init:turso` 初始化表结构（需设置 TURSO_URL 和 TURSO_TOKEN 环境变量）。
+
+| Secret 名称                | 说明                | 示例值                            |
+| -------------------------- | ------------------- | --------------------------------- |
+| `TURSO_URL`                | Turso 数据库 URL    | `libsql://your-db.turso.io`       |
+| `TURSO_TOKEN`              | Turso 访问令牌      | `your_turso_token`                |
+
+**使用 Upstash Redis：**
+
+| Secret 名称                | 说明                | 示例值                   |
+| -------------------------- | ------------------- | ------------------------ |
+| `UPSTASH_URL`              | Upstash Redis URL   | `https://xxx.upstash.io` |
+| `UPSTASH_TOKEN`            | Upstash Redis Token | `your_upstash_token`     |
+
+其他可选环境变量可按需继续添加到 GitHub Secrets，工作流会自动同步已配置且非空的变量到 EdgeOne 项目环境变量中。
+
+**3. 触发部署**
+
+- 进入仓库的 Actions 页面
+- 选择 "Deploy to EdgeOne" workflow
+- 点击 "Run workflow"
+- `project_name` 默认为 `moontvplus`
+- `area` 默认为 `overseas`，即全球可用区（不含中国大陆）；如需全球可用区可选择 `global`
+- `sync_environment` 默认开启，会在部署后同步环境变量并再次部署以确保新建项目也能读取环境变量
+
 
 ---
 
@@ -411,11 +471,14 @@ dockge/komodo 等 docker compose UI 也有自动更新功能
 | SITE_BASE                                | 站点 url                                                     | 形如 https://example.com    | 空                                                           |
 | NEXT_PUBLIC_SITE_NAME                    | 站点名称                                                     | 任意字符串                  | MoonTV                                                       |
 | ANNOUNCEMENT                             | 站点公告                                                     | 任意字符串                  | 本网站仅提供影视信息搜索服务，所有内容均来自第三方网站。本站不存储任何视频资源，不对任何内容的准确性、合法性、完整性负责。 |
-| NEXT_PUBLIC_STORAGE_TYPE                 | 播放记录/收藏的存储方式                                      | redis、kvrocks、upstash、d1 | 无默认，必填字段                                             |
+| ANNOUNCEMENT_DISPLAY_MODE                | 公告显示模式                                                 | once、every                 | once                                                        |
+| NEXT_PUBLIC_STORAGE_TYPE                 | 播放记录/收藏的存储方式                                      | redis、kvrocks、upstash、d1、turso、postgres | 无默认，必填字段                                             |
 | KVROCKS_URL                              | kvrocks 连接 url                                             | 连接 url                    | 空                                                           |
 | REDIS_URL                                | redis 连接 url                                               | 连接 url                    | 空                                                           |
 | UPSTASH_URL                              | upstash redis 连接 url                                       | 连接 url                    | 空                                                           |
 | UPSTASH_TOKEN                            | upstash redis 连接 token                                     | 连接 token                  | 空                                                           |
+| TURSO_URL                                | Turso (libSQL) 数据库连接 url                                | libsql://xxx.turso.io       | 空                                                           |
+| TURSO_TOKEN                              | Turso (libSQL) 数据库访问令牌                                | 访问令牌                    | 空                                                           |
 | NEXT_PUBLIC_SEARCH_MAX_PAGE              | 搜索接口可拉取的最大页数                                     | 1-50                        | 5                                                            |
 | NEXT_PUBLIC_DOUBAN_PROXY_TYPE            | 豆瓣数据源请求方式                                           | 见下方                      | direct                                                       |
 | NEXT_PUBLIC_DOUBAN_PROXY                 | 自定义豆瓣数据代理 URL                                       | url prefix                  | (空)                                                         |
@@ -452,6 +515,31 @@ dockge/komodo 等 docker compose UI 也有自动更新功能
 | QR_LOGIN_STORE_MODE                      | 电视端扫码登录状态存储模式；serverless环境下多节点内存状态不可靠。 | auto、memory、hybrid、shared | auto                                                         |
 | WEB_PUSH_PROXY                           | Web Push 服务端发送代理地址，用于服务器访问 FCM 等 Push endpoint | HTTP/HTTPS 代理 URL          | (空)                                                         |
 | WEB_PUSH_BASEURL                         | Web Push endpoint 反向代理 Base URL；支持 `{endpoint}`（URL编码）和 `{raw_endpoint}`（不编码）占位符 | URL                         | (空)                                                         |
+| TELEGRAM_BOT_TOKEN                       | Telegram Bot Token，用于 Bot 登录、绑定和通知推送             | BotFather 生成的 token       | (空)                                                         |
+| TELEGRAM_BOT_USERNAME                    | Telegram Bot 用户名（不含或包含 @ 均可）                      | bot username                | (空)                                                         |
+| TELEGRAM_WEBHOOK_SECRET                  | Telegram Webhook Secret；Webhook 路径为 `/api/telegram/webhook/<secret>` | 随机长字符串                | (空)                                                         |
+| TELEGRAM_API_PROXY                       | Telegram Bot API 系统代理（Node 部署可用，Cloudflare/Edge 会忽略） | HTTP/HTTPS 代理 URL         | (空)                                                         |
+| TELEGRAM_API_BASE_URL                    | Telegram Bot API 反代 Base URL，用于替换 `https://api.telegram.org` | URL                         | (空)                                                         |
+| TELEGRAM_LOGIN_ENABLED                   | 是否启用 Telegram 快捷登录                                    | true/false                  | true                                                         |
+| TELEGRAM_BINDING_ENABLED                 | 是否启用 Telegram 账号绑定                                    | true/false                  | true                                                         |
+| TELEGRAM_NOTIFICATIONS_ENABLED           | 是否启用 Telegram 通知推送                                    | true/false                  | true                                                         |
+| TELEGRAM_DEFAULT_NOTIFICATIONS           | 新绑定 Telegram 用户是否默认开启通知                          | true/false                  | true                                                         |
+
+
+### Telegram Bot 配置
+
+1. 在 Telegram 通过 BotFather 创建 Bot，获取 `TELEGRAM_BOT_TOKEN` 和 Bot 用户名。
+2. 设置 `TELEGRAM_BOT_TOKEN`、`TELEGRAM_BOT_USERNAME`、`TELEGRAM_WEBHOOK_SECRET` 并重启服务。
+3. 如服务器无法直连 Telegram，可选填 `TELEGRAM_API_PROXY`（系统代理）或 `TELEGRAM_API_BASE_URL`（反代 Base URL）。
+4. 可在后台 Telegram Bot 配置页点击“一键设置 Webhook”，或手动将 Webhook 设置到：`https://你的域名/api/telegram/webhook/<TELEGRAM_WEBHOOK_SECRET>`。
+
+可使用以下命令设置 Webhook：
+
+```bash
+curl "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/setWebhook"   -d "url=https://你的域名/api/telegram/webhook/$TELEGRAM_WEBHOOK_SECRET"   -d "secret_token=$TELEGRAM_WEBHOOK_SECRET"
+```
+
+用户登录后可在“通知设置”中生成绑定码，也可在注册成功页直接绑定；绑定后可接收站内通知并使用 Telegram 确认登录。
 
 NEXT_PUBLIC_DOUBAN_PROXY_TYPE 选项解释：
 

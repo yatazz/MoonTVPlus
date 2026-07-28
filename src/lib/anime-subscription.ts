@@ -3,6 +3,7 @@ import parseTorrentName from 'parse-torrent-name';
 import { parseStringPromise } from 'xml2js';
 
 import { getConfig, setCachedConfig } from '@/lib/config';
+import { getMagnetBaseUrl, universalMagnetFetch } from '@/lib/magnet.client';
 import { db, getStorage } from '@/lib/db';
 import { EmailService } from '@/lib/email.service';
 import {
@@ -13,6 +14,14 @@ import {
 import { AnimeSubscription, AnimeSubscriptionDownloadTool } from '@/types/anime-subscription';
 
 const downloadTools: AnimeSubscriptionDownloadTool[] = ['aria2', 'qBittorrent', 'Transmission'];
+
+const pickRssText = (value: any): string => {
+  if (value === undefined || value === null) return '';
+  const first = Array.isArray(value) ? value[0] : value;
+  if (first === undefined || first === null) return '';
+  if (typeof first === 'object') return String(first._ ?? first.$?.url ?? first.$?.href ?? '');
+  return String(first);
+};
 
 function getAnimeSubscriptionDownloadTool(tool: unknown): AnimeSubscriptionDownloadTool {
   return typeof tool === 'string' && downloadTools.includes(tool as AnimeSubscriptionDownloadTool)
@@ -49,15 +58,37 @@ export function extractEpisode(title: string): number | null {
 }
 
 /**
- * 检查标题是否匹配过滤条件
+ * 解析逗号分隔关键词（兼容中文逗号）
+ */
+function parseKeywords(text: string): string[] {
+  return text
+    .replace(/，/g, ',')
+    .split(',')
+    .map((k) => k.trim())
+    .filter(Boolean);
+}
+
+/**
+ * 检查标题是否匹配过滤条件（包含关键词，AND：必须全部命中）
  */
 export function matchesFilter(title: string, filterText: string): boolean {
   if (!filterText) return true;
 
   // 支持多个关键词，用逗号分隔，必须全部匹配
-  const keywords = filterText.split(',').map((k) => k.trim()).filter(Boolean);
+  const keywords = parseKeywords(filterText);
 
   return keywords.every((keyword) => title.includes(keyword));
+}
+
+/**
+ * 检查标题是否命中排除关键词（OR：任一命中即排除）
+ */
+export function matchesExclude(title: string, excludeText?: string): boolean {
+  if (!excludeText) return false;
+
+  const keywords = parseKeywords(excludeText);
+
+  return keywords.some((keyword) => title.includes(keyword));
 }
 
 /**
@@ -65,26 +96,50 @@ export function matchesFilter(title: string, filterText: string): boolean {
  */
 export async function searchACG(
   keyword: string,
-  source: 'acgrip' | 'mikan' | 'dmhy'
+  source: 'acgrip' | 'mikan' | 'dmhy' | 'nyaa'
 ) {
   const trimmedKeyword = keyword.trim();
+  const config = await getConfig();
 
   let searchUrl: string;
 
   switch (source) {
-    case 'mikan':
-      searchUrl = `https://mikanani.me/RSS/Search?searchstr=${encodeURIComponent(trimmedKeyword)}`;
+    case 'mikan': {
+      const baseUrl = getMagnetBaseUrl(
+        'https://mikanani.me',
+        config.SiteConfig.MagnetMikanReverseProxy
+      );
+      searchUrl = `${baseUrl}/RSS/Search?searchstr=${encodeURIComponent(trimmedKeyword)}`;
       break;
-    case 'dmhy':
-      searchUrl = `http://share.dmhy.org/topics/rss/rss.xml?keyword=${encodeURIComponent(trimmedKeyword)}`;
+    }
+    case 'dmhy': {
+      const baseUrl = getMagnetBaseUrl(
+        'http://share.dmhy.org',
+        config.SiteConfig.MagnetDmhyReverseProxy
+      );
+      searchUrl = `${baseUrl}/topics/rss/rss.xml?keyword=${encodeURIComponent(trimmedKeyword)}`;
       break;
+    }
+    case 'nyaa': {
+      const baseUrl = getMagnetBaseUrl(
+        'https://nyaa.si',
+        config.SiteConfig.MagnetNyaaReverseProxy
+      );
+      searchUrl = `${baseUrl}/?page=rss&q=${encodeURIComponent(trimmedKeyword)}&c=1_0&f=0`;
+      break;
+    }
     case 'acgrip':
-    default:
-      searchUrl = `https://acg.rip/page/1.xml?term=${encodeURIComponent(trimmedKeyword)}`;
+    default: {
+      const baseUrl = getMagnetBaseUrl(
+        'https://acg.rip',
+        config.SiteConfig.MagnetAcgripReverseProxy
+      );
+      searchUrl = `${baseUrl}/page/1.xml?term=${encodeURIComponent(trimmedKeyword)}`;
       break;
+    }
   }
 
-  const response = await fetch(searchUrl, {
+  const response = await universalMagnetFetch(searchUrl, config.SiteConfig.MagnetProxy, {
     headers: {
       'User-Agent':
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
@@ -104,14 +159,21 @@ export async function searchACG(
 
   const items = parsed.rss.channel[0].item;
 
-  // 统一格式
+  // 统一格式。注意：Nyaa RSS 的 link 是 .torrent 下载地址，guid 才是详情页。
   return items.map((item: any) => {
-    const title = item.title?.[0] || '';
-    const link = item.link?.[0] || '';
-    const guid = item.guid?.[0] || link || `${title}-${item.pubDate?.[0] || ''}`;
-    const pubDate = item.pubDate?.[0] || '';
-    const torrentUrl = item.enclosure?.[0]?.$?.url || '';
-    const description = item.description?.[0] || '';
+    const title = pickRssText(item.title);
+    const rawLink = pickRssText(item.link);
+    const rawGuid = pickRssText(item.guid);
+    const pubDate = pickRssText(item.pubDate);
+    const description = pickRssText(item.description) || pickRssText(item['content:encoded']);
+    const enclosureUrl =
+      pickRssText(item.enclosure?.[0]?.$?.url) ||
+      pickRssText(item.enclosure?.[0]?.$?.href);
+
+    const isNyaa = source === 'nyaa';
+    const link = isNyaa ? (rawGuid || rawLink) : rawLink;
+    const torrentUrl = isNyaa ? rawLink : enclosureUrl;
+    const guid = rawGuid || link || torrentUrl || `${title}-${pubDate}`;
 
     return {
       title,
@@ -237,7 +299,7 @@ async function sendAnimeUpdateNotifications(
           <div style="background-color: #f5f5f5; padding: 15px; border-radius: 5px; margin: 20px 0;">
             <h3 style="margin-top: 0; color: #2563eb;">${subscription.title}</h3>
             <p style="margin: 10px 0;">新增集数：第 ${episodeList} 集</p>
-            <p style="margin: 10px 0; color: #666;">搜索源：${subscription.source === 'acgrip' ? 'ACG.RIP' : subscription.source === 'mikan' ? '蜜柑' : '动漫花园'}</p>
+            <p style="margin: 10px 0; color: #666;">搜索源：${subscription.source === 'acgrip' ? 'ACG.RIP' : subscription.source === 'mikan' ? '蜜柑' : subscription.source === 'nyaa' ? 'Nyaa' : '动漫花园'}</p>
           </div>
           <p style="color: #666; font-size: 14px;">这些集数已自动添加到 OpenList 离线下载队列。</p>
           <hr style="border: none; border-top: 1px solid #eee; margin: 20px 0;">
@@ -278,9 +340,10 @@ export async function checkSubscription(subscription: AnimeSubscription) {
   // 1. 搜索资源
   const results = await searchACG(subscription.title, subscription.source);
 
-  // 2. 过滤并解析集数
+  // 2. 过滤并解析集数（包含关键词 AND，排除关键词 OR）
   const newEpisodes = results
     .filter((item: any) => matchesFilter(item.title, subscription.filterText))
+    .filter((item: any) => !matchesExclude(item.title, subscription.excludeText))
     .map((item: any) => ({
       episode: extractEpisode(item.title),
       ...item,

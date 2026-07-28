@@ -1,10 +1,151 @@
 /* eslint-disable @typescript-eslint/no-explicit-any, no-console */
 
+import { getConfig, setCachedConfig } from '@/lib/config';
+import { db } from '@/lib/db';
+
 const QUARK_SHARE_API_BASE = 'https://drive-h.quark.cn/1/clouddrive';
 const QUARK_DRIVE_API_BASE = 'https://drive-pc.quark.cn/1/clouddrive';
 const QUARK_QUERY = 'pr=ucpro&fr=pc';
 const QUARK_API_USER_AGENT =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) quark-cloud-drive/2.5.20 Chrome/100.0.4896.160 Electron/18.3.5.4-b478491100 Safari/537.36 Channel/pckk_other_ch';
+
+type QuarkRenewableCookieName = '__puus' | '__pus';
+
+const QUARK_RENEWABLE_COOKIE_NAMES: QuarkRenewableCookieName[] = [
+  '__puus',
+  '__pus',
+];
+const runtimeCookieValues: Partial<Record<QuarkRenewableCookieName, string>> =
+  {};
+let quarkCookiePersistQueue: Promise<void> = Promise.resolve();
+
+function setCookieField(cookie: string, name: string, value: string): string {
+  const normalized = normalizeQuarkCookie(cookie);
+  const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const pattern = new RegExp(`(^|;\\s*)${escapedName}=[^;]*`);
+
+  if (pattern.test(normalized)) {
+    return normalized.replace(pattern, `$1${name}=${value}`);
+  }
+
+  return `${normalized}${
+    normalized && !normalized.endsWith(';') ? '; ' : ''
+  }${name}=${value}`;
+}
+
+function applyRuntimeCookieValues(cookie: string): string {
+  let updated = normalizeQuarkCookie(cookie);
+  for (const name of QUARK_RENEWABLE_COOKIE_NAMES) {
+    const value = runtimeCookieValues[name];
+    if (value) {
+      updated = setCookieField(updated, name, value);
+    }
+  }
+  return updated;
+}
+
+function getResponseSetCookieHeaders(response: Response): string[] {
+  const headers = response.headers as Headers & {
+    getSetCookie?: () => string[];
+  };
+  if (typeof headers.getSetCookie === 'function') {
+    return headers.getSetCookie();
+  }
+
+  const setCookie = response.headers.get('set-cookie');
+  return setCookie ? [setCookie] : [];
+}
+
+function extractRenewableCookieValues(
+  response: Response
+): Partial<Record<QuarkRenewableCookieName, string>> {
+  const values: Partial<Record<QuarkRenewableCookieName, string>> = {};
+  const setCookieHeaders = getResponseSetCookieHeaders(response);
+
+  for (const header of setCookieHeaders) {
+    for (const name of QUARK_RENEWABLE_COOKIE_NAMES) {
+      const match = header.match(
+        new RegExp(`(?:^|[,;]\\s*)${name}=([^;,\\s]+)`)
+      );
+      if (match?.[1]) {
+        values[name] = match[1];
+      }
+    }
+  }
+
+  return values;
+}
+
+async function persistRenewedQuarkCookie(
+  requestCookie: string,
+  renewedValues: Partial<Record<QuarkRenewableCookieName, string>>
+): Promise<void> {
+  const names = QUARK_RENEWABLE_COOKIE_NAMES.filter(
+    (name) => renewedValues[name]
+  );
+  if (names.length === 0) return;
+
+  for (const name of names) {
+    runtimeCookieValues[name] = renewedValues[name];
+  }
+
+  quarkCookiePersistQueue = quarkCookiePersistQueue
+    .catch(() => undefined)
+    .then(async () => {
+      try {
+        const config = await getConfig();
+        const quarkConfig = config.NetDiskConfig?.Quark;
+        const currentCookie = quarkConfig?.Cookie || requestCookie;
+        let updatedCookie = normalizeQuarkCookie(currentCookie);
+
+        for (const name of names) {
+          const value = renewedValues[name];
+          if (value) {
+            updatedCookie = setCookieField(updatedCookie, name, value);
+          }
+        }
+
+        if (
+          !quarkConfig ||
+          updatedCookie === normalizeQuarkCookie(currentCookie)
+        ) {
+          return;
+        }
+
+        config.NetDiskConfig = config.NetDiskConfig || {};
+        config.NetDiskConfig.Quark = {
+          ...quarkConfig,
+          Cookie: updatedCookie,
+        };
+
+        await db.saveAdminConfig(config);
+        await setCachedConfig(config);
+        console.log(`[quark] renewed cookie fields: ${names.join(', ')}`);
+      } catch (error) {
+        console.warn('[quark] persist renewed cookie failed:', error);
+      }
+    });
+
+  await quarkCookiePersistQueue;
+}
+
+async function renewQuarkCookieFromResponse(
+  response: Response,
+  requestCookie: string
+): Promise<void> {
+  const renewedValues = extractRenewableCookieValues(response);
+  await persistRenewedQuarkCookie(requestCookie, renewedValues);
+}
+
+async function quarkFetch(
+  input: RequestInfo | URL,
+  init: RequestInit,
+  requestCookie: string
+): Promise<Response> {
+  const response = await fetch(input, init);
+  await renewQuarkCookieFromResponse(response, requestCookie);
+  return response;
+}
 
 export interface QuarkShareLinkInfo {
   pwdId: string;
@@ -73,7 +214,7 @@ function buildApiUrl(base: string, path: string, query = '') {
 function getHeaders(cookie: string): HeadersInit {
   return {
     'content-type': 'application/json',
-    cookie,
+    cookie: applyRuntimeCookieValues(cookie),
     referer: 'https://pan.quark.cn/',
     'user-agent': QUARK_API_USER_AGENT,
   };
@@ -81,7 +222,7 @@ function getHeaders(cookie: string): HeadersInit {
 
 export function getQuarkPlayHeaders(cookie: string): Record<string, string> {
   return {
-    cookie,
+    cookie: applyRuntimeCookieValues(cookie),
     referer: 'https://pan.quark.cn/',
     'user-agent': QUARK_API_USER_AGENT,
   };
@@ -99,7 +240,9 @@ export function assertQuarkCookieHeaderSafe(cookie: string): string {
   const normalized = normalizeQuarkCookie(cookie);
   for (let i = 0; i < normalized.length; i += 1) {
     if (normalized.charCodeAt(i) > 255) {
-      throw new Error('夸克 Cookie 含有非法字符，请确认没有中文标点、中文空格或说明文字');
+      throw new Error(
+        '夸克 Cookie 含有非法字符，请确认没有中文标点、中文空格或说明文字'
+      );
     }
   }
   return normalized;
@@ -112,10 +255,7 @@ function normalizePath(path: string): string {
 }
 
 function joinPath(...parts: string[]) {
-  const joined = parts
-    .filter(Boolean)
-    .join('/')
-    .replace(/\/+/g, '/');
+  const joined = parts.filter(Boolean).join('/').replace(/\/+/g, '/');
   return normalizePath(joined);
 }
 
@@ -144,7 +284,10 @@ function ensureOk(data: any, fallbackMessage: string) {
   throw new Error(data?.message || data?.msg || fallbackMessage);
 }
 
-export function parseQuarkShareUrl(url: string, passcode = ''): QuarkShareLinkInfo {
+export function parseQuarkShareUrl(
+  url: string,
+  passcode = ''
+): QuarkShareLinkInfo {
   const parsed = new URL(url);
   const pwdId =
     parsed.pathname.match(/\/s\/([A-Za-z0-9_-]+)/)?.[1] ||
@@ -166,7 +309,7 @@ export function parseQuarkShareUrl(url: string, passcode = ''): QuarkShareLinkIn
 }
 
 async function fetchShareToken(cookie: string, share: QuarkShareLinkInfo) {
-  const response = await fetch(
+  const response = await quarkFetch(
     buildApiUrl(QUARK_SHARE_API_BASE, '/share/sharepage/token'),
     {
       method: 'POST',
@@ -175,16 +318,15 @@ async function fetchShareToken(cookie: string, share: QuarkShareLinkInfo) {
         pwd_id: share.pwdId,
         passcode: share.passcode,
       }),
-    }
+    },
+    cookie
   );
 
   const data = await parseJson(response);
   ensureOk(data, '获取夸克分享 token 失败');
 
   const stoken =
-    data?.data?.stoken ||
-    data?.data?.share_token ||
-    data?.data?.token;
+    data?.data?.stoken || data?.data?.share_token || data?.data?.token;
 
   if (!stoken) {
     throw new Error('夸克分享 token 缺失');
@@ -211,12 +353,17 @@ async function fetchShareFolderItems(
     _fetch_banner: '0',
   });
 
-  const response = await fetch(
-    buildApiUrl(QUARK_SHARE_API_BASE, '/share/sharepage/detail', query.toString()),
+  const response = await quarkFetch(
+    buildApiUrl(
+      QUARK_SHARE_API_BASE,
+      '/share/sharepage/detail',
+      query.toString()
+    ),
     {
       method: 'GET',
       headers: getHeaders(cookie),
-    }
+    },
+    cookie
   );
 
   const data = await parseJson(response);
@@ -247,12 +394,13 @@ async function fetchDriveFolderItems(
     _sort: 'file_type:asc,file_name:asc',
   });
 
-  const response = await fetch(
+  const response = await quarkFetch(
     buildApiUrl(QUARK_DRIVE_API_BASE, '/file/sort', query.toString()),
     {
       method: 'GET',
       headers: getHeaders(cookie),
-    }
+    },
+    cookie
   );
 
   const data = await parseJson(response);
@@ -294,9 +442,13 @@ async function findDirectoryByName(
   folderName: string
 ): Promise<any | null> {
   const items = await fetchAllDriveFolderItems(cookie, parentFid);
-  return items.find(
-    (item: any) => Boolean(item.dir || item.is_dir) && getDriveItemName(item) === folderName
-  ) || null;
+  return (
+    items.find(
+      (item: any) =>
+        Boolean(item.dir || item.is_dir) &&
+        getDriveItemName(item) === folderName
+    ) || null
+  );
 }
 
 async function findDriveFileInFolder(
@@ -308,19 +460,23 @@ async function findDriveFileInFolder(
   if (!fileName) return null;
 
   const items = await fetchAllDriveFolderItems(cookie, parentFid);
-  return items.find((item: any) => {
-    const isDir = Boolean(item.dir || item.is_dir || item.file_type === 0);
-    if (isDir) return false;
-    const itemName = String(item.file_name || item.name || '');
-    if (itemName !== fileName) return false;
-    if (input.size && Number(item.size || 0) > 0) {
-      return Number(item.size || 0) === input.size;
-    }
-    return true;
-  }) || null;
+  return (
+    items.find((item: any) => {
+      const isDir = Boolean(item.dir || item.is_dir || item.file_type === 0);
+      if (isDir) return false;
+      const itemName = String(item.file_name || item.name || '');
+      if (itemName !== fileName) return false;
+      if (input.size && Number(item.size || 0) > 0) {
+        return Number(item.size || 0) === input.size;
+      }
+      return true;
+    }) || null
+  );
 }
 
-export async function validateQuarkCookieReadable(cookie: string): Promise<void> {
+export async function validateQuarkCookieReadable(
+  cookie: string
+): Promise<void> {
   const safeCookie = assertQuarkCookieHeaderSafe(cookie);
   await fetchDriveFolderItems(safeCookie, '0');
 }
@@ -333,7 +489,12 @@ export async function listQuarkShareVideos(
   const safeCookie = assertQuarkCookieHeaderSafe(cookie);
   const share = parseQuarkShareUrl(shareUrl, passcode);
   const { stoken, shareTitle } = await fetchShareToken(safeCookie, share);
-  const allItems = await collectShareItemsRecursive(safeCookie, share.pwdId, stoken, '0');
+  const allItems = await collectShareItemsRecursive(
+    safeCookie,
+    share.pwdId,
+    stoken,
+    '0'
+  );
   const files = allItems
     .filter((item) => !item.dir && isVideoFile(item.fileName))
     .map((item) => ({
@@ -361,24 +522,25 @@ async function createDriveFolder(
   parentFid: string,
   folderName: string
 ) {
-  const response = await fetch(buildApiUrl(QUARK_DRIVE_API_BASE, '/file'), {
-    method: 'POST',
-    headers: getHeaders(cookie),
-    body: JSON.stringify({
-      pdir_fid: parentFid,
-      file_name: folderName,
-      dir_path: '',
-      dir_init_lock: false,
-    }),
-  });
+  const response = await quarkFetch(
+    buildApiUrl(QUARK_DRIVE_API_BASE, '/file'),
+    {
+      method: 'POST',
+      headers: getHeaders(cookie),
+      body: JSON.stringify({
+        pdir_fid: parentFid,
+        file_name: folderName,
+        dir_path: '',
+        dir_init_lock: false,
+      }),
+    },
+    cookie
+  );
 
   const data = await parseJson(response);
   ensureOk(data, `创建夸克目录失败：${folderName}`);
 
-  const fid =
-    data?.data?.fid ||
-    data?.data?.file_id ||
-    data?.metadata?.fid;
+  const fid = data?.data?.fid || data?.data?.file_id || data?.metadata?.fid;
 
   if (!fid) {
     throw new Error(`夸克目录创建成功但未返回 fid：${folderName}`);
@@ -466,7 +628,7 @@ async function submitSaveTask(
     throw new Error('没有可保存的文件');
   }
 
-  const response = await fetch(
+  const response = await quarkFetch(
     buildApiUrl(QUARK_SHARE_API_BASE, '/share/sharepage/save'),
     {
       method: 'POST',
@@ -482,7 +644,8 @@ async function submitSaveTask(
         fid_token_list: items.map((item) => item.shareFidToken || ''),
         share_fid_token_list: items.map((item) => item.shareFidToken || ''),
       }),
-    }
+    },
+    cookie
   );
 
   const data = await parseJson(response);
@@ -497,10 +660,14 @@ async function pollTask(cookie: string, taskId: string) {
       retry_index: String(i),
     });
 
-    const response = await fetch(buildApiUrl(QUARK_SHARE_API_BASE, '/task', query.toString()), {
-      method: 'GET',
-      headers: getHeaders(cookie),
-    });
+    const response = await quarkFetch(
+      buildApiUrl(QUARK_SHARE_API_BASE, '/task', query.toString()),
+      {
+        method: 'GET',
+        headers: getHeaders(cookie),
+      },
+      cookie
+    );
 
     const data = await parseJson(response);
     ensureOk(data, '查询夸克任务状态失败');
@@ -515,11 +682,7 @@ async function pollTask(cookie: string, taskId: string) {
       return;
     }
 
-    if (
-      task?.status === -1 ||
-      task?.status === 'failed' ||
-      task?.err_code
-    ) {
+    if (task?.status === -1 || task?.status === 'failed' || task?.err_code) {
       throw new Error(task?.message || task?.err_msg || '夸克任务执行失败');
     }
 
@@ -540,11 +703,20 @@ export async function transferQuarkShare(
   const safeCookie = assertQuarkCookieHeaderSafe(cookie);
   const share = parseQuarkShareUrl(input.shareUrl, input.passcode);
   const { stoken } = await fetchShareToken(safeCookie, share);
-  const topLevelItems = await fetchShareFolderItems(safeCookie, share.pwdId, stoken, '0');
+  const topLevelItems = await fetchShareFolderItems(
+    safeCookie,
+    share.pwdId,
+    stoken,
+    '0'
+  );
   const target = await ensureQuarkDrivePath(safeCookie, input.savePath);
   const existedItems = await fetchAllDriveFolderItems(safeCookie, target.fid);
-  const existedNames = new Set(existedItems.map((item: any) => getDriveItemName(item)));
-  const pendingItems = topLevelItems.filter((item) => !existedNames.has(item.fileName));
+  const existedNames = new Set(
+    existedItems.map((item: any) => getDriveItemName(item))
+  );
+  const pendingItems = topLevelItems.filter(
+    (item) => !existedNames.has(item.fileName)
+  );
 
   if (pendingItems.length === 0) {
     return {
@@ -554,7 +726,13 @@ export async function transferQuarkShare(
     };
   }
 
-  const taskId = await submitSaveTask(safeCookie, share, stoken, target.fid, pendingItems);
+  const taskId = await submitSaveTask(
+    safeCookie,
+    share,
+    stoken,
+    target.fid,
+    pendingItems
+  );
 
   if (taskId) {
     await pollTask(safeCookie, taskId);
@@ -579,16 +757,33 @@ export async function createQuarkInstantPlayFolder(
   const safeCookie = assertQuarkCookieHeaderSafe(cookie);
   const share = parseQuarkShareUrl(input.shareUrl, input.passcode);
   const { stoken, shareTitle } = await fetchShareToken(safeCookie, share);
-  const allItems = await collectShareItemsRecursive(safeCookie, share.pwdId, stoken, '0');
-  const videoItems = allItems.filter((item) => !item.dir && isVideoFile(item.fileName));
+  const allItems = await collectShareItemsRecursive(
+    safeCookie,
+    share.pwdId,
+    stoken,
+    '0'
+  );
+  const videoItems = allItems.filter(
+    (item) => !item.dir && isVideoFile(item.fileName)
+  );
 
   if (videoItems.length === 0) {
     throw new Error('分享中没有可播放的视频文件');
   }
 
-  const tempRoot = await ensureQuarkDrivePath(safeCookie, input.playTempSavePath);
-  const folderName = buildInstantPlayFolderName(share.pwdId, input.title || shareTitle);
-  const existedFolder = await findDirectoryByName(safeCookie, tempRoot.fid, folderName);
+  const tempRoot = await ensureQuarkDrivePath(
+    safeCookie,
+    input.playTempSavePath
+  );
+  const folderName = buildInstantPlayFolderName(
+    share.pwdId,
+    input.title || shareTitle
+  );
+  const existedFolder = await findDirectoryByName(
+    safeCookie,
+    tempRoot.fid,
+    folderName
+  );
 
   if (existedFolder) {
     return {
@@ -599,8 +794,18 @@ export async function createQuarkInstantPlayFolder(
     };
   }
 
-  const folderFid = await createDriveFolder(safeCookie, tempRoot.fid, folderName);
-  const taskId = await submitSaveTask(safeCookie, share, stoken, folderFid, videoItems);
+  const folderFid = await createDriveFolder(
+    safeCookie,
+    tempRoot.fid,
+    folderName
+  );
+  const taskId = await submitSaveTask(
+    safeCookie,
+    share,
+    stoken,
+    folderFid,
+    videoItems
+  );
 
   if (taskId) {
     await pollTask(safeCookie, taskId);
@@ -625,7 +830,11 @@ export async function ensureQuarkPlayFolder(
   const safeCookie = assertQuarkCookieHeaderSafe(cookie);
   const tempRoot = await ensureQuarkDrivePath(safeCookie, playTempSavePath);
   const folderName = buildInstantPlayFolderName(shareId, title);
-  const existedFolder = await findDirectoryByName(safeCookie, tempRoot.fid, folderName);
+  const existedFolder = await findDirectoryByName(
+    safeCookie,
+    tempRoot.fid,
+    folderName
+  );
   if (existedFolder) {
     return {
       folderFid: String(existedFolder.fid || existedFolder.file_id),
@@ -634,7 +843,11 @@ export async function ensureQuarkPlayFolder(
     };
   }
 
-  const folderFid = await createDriveFolder(safeCookie, tempRoot.fid, folderName);
+  const folderFid = await createDriveFolder(
+    safeCookie,
+    tempRoot.fid,
+    folderName
+  );
   return {
     folderFid,
     folderPath: joinPath(tempRoot.path, folderName),
@@ -656,10 +869,14 @@ export async function saveQuarkShareFile(
 ): Promise<string> {
   const safeCookie = assertQuarkCookieHeaderSafe(cookie);
 
-  const existedFile = await findDriveFileInFolder(safeCookie, input.playFolderFid, {
-    fileName: input.fileName,
-    size: input.size,
-  });
+  const existedFile = await findDriveFileInFolder(
+    safeCookie,
+    input.playFolderFid,
+    {
+      fileName: input.fileName,
+      size: input.size,
+    }
+  );
   if (existedFile) {
     return String(existedFile.fid || existedFile.file_id);
   }
@@ -690,10 +907,14 @@ export async function saveQuarkShareFile(
       retry_index: String(i),
     });
 
-    const response = await fetch(buildApiUrl(QUARK_SHARE_API_BASE, '/task', query.toString()), {
-      method: 'GET',
-      headers: getHeaders(safeCookie),
-    });
+    const response = await quarkFetch(
+      buildApiUrl(QUARK_SHARE_API_BASE, '/task', query.toString()),
+      {
+        method: 'GET',
+        headers: getHeaders(safeCookie),
+      },
+      safeCookie
+    );
     const data = await parseJson(response);
     ensureOk(data, '查询夸克任务状态失败');
 
@@ -702,20 +923,31 @@ export async function saveQuarkShareFile(
       return String(saveAsTopFids[0]);
     }
 
-    const savedFile = await findDriveFileInFolder(safeCookie, input.playFolderFid, {
-      fileName: input.fileName,
-      size: input.size,
-    });
+    const savedFile = await findDriveFileInFolder(
+      safeCookie,
+      input.playFolderFid,
+      {
+        fileName: input.fileName,
+        size: input.size,
+      }
+    );
     if (savedFile) {
       return String(savedFile.fid || savedFile.file_id);
     }
 
     const status = data?.data?.status;
     if (status === -1 || status === 'failed' || data?.data?.err_code) {
-      throw new Error(data?.data?.message || data?.data?.err_msg || '夸克任务执行失败');
+      throw new Error(
+        data?.data?.message || data?.data?.err_msg || '夸克任务执行失败'
+      );
     }
 
-    if (status === 2 || status === 'finished' || status === 'success' || data?.data?.finished_at) {
+    if (
+      status === 2 ||
+      status === 'finished' ||
+      status === 'success' ||
+      data?.data?.finished_at
+    ) {
       break;
     }
 
@@ -735,14 +967,18 @@ export async function getQuarkPlayUrls(
   const urls: Array<{ name: string; url: string; priority: number }> = [];
 
   try {
-    const response = await fetch(buildApiUrl(QUARK_DRIVE_API_BASE, '/file/download'), {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({
-        fids: [savedFileId],
-      }),
-      cache: 'no-store',
-    });
+    const response = await quarkFetch(
+      buildApiUrl(QUARK_DRIVE_API_BASE, '/file/download'),
+      {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          fids: [savedFileId],
+        }),
+        cache: 'no-store',
+      },
+      safeCookie
+    );
     const data = await parseJson(response);
     ensureOk(data, '获取夸克下载地址失败');
     const downloadUrl = data?.data?.[0]?.download_url;
@@ -758,16 +994,20 @@ export async function getQuarkPlayUrls(
   }
 
   try {
-    const response = await fetch(buildApiUrl(QUARK_DRIVE_API_BASE, '/file/v2/play'), {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({
-        fid: savedFileId,
-        resolutions: 'normal,low,high,super,2k,4k',
-        supports: 'fmp4',
-      }),
-      cache: 'no-store',
-    });
+    const response = await quarkFetch(
+      buildApiUrl(QUARK_DRIVE_API_BASE, '/file/v2/play'),
+      {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          fid: savedFileId,
+          resolutions: 'normal,low,high,super,2k,4k',
+          supports: 'fmp4',
+        }),
+        cache: 'no-store',
+      },
+      safeCookie
+    );
     const data = await parseJson(response);
     ensureOk(data, '获取夸克转码地址失败');
     const nameMap: Record<string, string> = {
@@ -795,7 +1035,9 @@ export async function getQuarkPlayUrls(
     console.warn('[quark] get transcoding play url failed:', error);
   }
 
-  const deduped = urls.filter((item, index, array) => array.findIndex((v) => v.url === item.url) === index);
+  const deduped = urls.filter(
+    (item, index, array) => array.findIndex((v) => v.url === item.url) === index
+  );
   deduped.sort((a, b) => {
     if (playMode === 'transcode_first') {
       if (a.name === '原画' && b.name !== '原画') return 1;
@@ -811,14 +1053,21 @@ export async function getQuarkPlayUrls(
   return deduped;
 }
 
-function parseContentRangeHeader(contentRange: string | null): QuarkRangeWindow | null {
+function parseContentRangeHeader(
+  contentRange: string | null
+): QuarkRangeWindow | null {
   if (!contentRange) return null;
   const match = contentRange.match(/^bytes\s+(\d+)-(\d+)\/(\d+|\*)$/i);
   if (!match) return null;
   const start = Number(match[1]);
   const end = Number(match[2]);
   const total = Number(match[3]);
-  if (!Number.isFinite(start) || !Number.isFinite(end) || !Number.isFinite(total)) return null;
+  if (
+    !Number.isFinite(start) ||
+    !Number.isFinite(end) ||
+    !Number.isFinite(total)
+  )
+    return null;
   return { start, end, total };
 }
 
@@ -843,7 +1092,9 @@ export async function probeQuarkPlayRange(
       return null;
     }
 
-    const window = parseContentRangeHeader(response.headers.get('content-range'));
+    const window = parseContentRangeHeader(
+      response.headers.get('content-range')
+    );
     return { response, window };
   } finally {
     clearTimeout(timeoutId);

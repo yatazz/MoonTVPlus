@@ -2,6 +2,7 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 
+import { isAccessTokenInvalidated } from '@/lib/access-token-invalidation';
 import { getAuthInfoFromCookie } from '@/lib/auth';
 import { TOKEN_CONFIG } from '@/lib/refresh-token';
 import { isTVModeEnabled } from '@/lib/tv-mode';
@@ -86,6 +87,11 @@ export async function middleware(request: NextRequest) {
   );
 
   if (!isValidSignature) {
+    return handleAuthFailure(request, pathname);
+  }
+
+  if (isAccessTokenInvalidated(authInfo)) {
+    console.log(`Access token invalidated for ${authInfo.username}`);
     return handleAuthFailure(request, pathname);
   }
 
@@ -183,6 +189,6 @@ function isTVModePath(pathname: string): boolean {
 // 配置middleware匹配规则
 export const config = {
   matcher: [
-    '/((?!_next/static|_next/image|favicon.ico|login|register|oidc-register|qr-login|warning|tv/login|api/login|api/register|api/logout|api/auth/oidc|api/auth/qr|api/auth/refresh|api/cron/|api/server-config|api/proxy-m3u8|api/cms-proxy|api/tvbox/subscribe|api/theme/css|api/openlist/cms-proxy|api/openlist/play|api/emby/cms-proxy|api/emby/play|api/emby/subtitle|api/emby/sources|tvbox/).*)',
+    '/((?!_next/static|_next/image|favicon.ico|login|register|oidc-register|qr-login|warning|tv/login|api/login|api/register|api/logout|api/auth/oidc|api/auth/qr|api/auth/refresh|api/telegram/login|api/telegram/config|api/telegram/webhook|api/cron/|api/server-config|api/proxy-m3u8|api/cms-proxy|api/tvbox/subscribe|api/theme/css|api/openlist/cms-proxy|api/openlist/play|api/emby/cms-proxy|api/emby/play|api/emby/subtitle|api/emby/sources|tvbox/).*)',
   ],
 };

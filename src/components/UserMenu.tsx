@@ -213,7 +213,7 @@ export const UserMenu: React.FC = () => {
   const [maxConcurrentDownloads, setMaxConcurrentDownloads] = useState(6);
   const [downloadThreadsPerTask, setDownloadThreadsPerTask] = useState(6);
   const [downloadSegmentTimeout, setDownloadSegmentTimeout] = useState(30000);
-  const [downloadMode, setDownloadMode] = useState<'browser' | 'filesystem'>(
+  const [downloadMode, setDownloadMode] = useState<'browser' | 'filesystem' | 'indexeddb'>(
     'browser'
   );
   const [filesystemSavePath, setFilesystemSavePath] = useState<string>('');
@@ -231,6 +231,12 @@ export const UserMenu: React.FC = () => {
   const [emailSettingsMessageType, setEmailSettingsMessageType] = useState<
     'success' | 'error' | null
   >(null);
+  const [telegramEnabled, setTelegramEnabled] = useState(false);
+  const [telegramBound, setTelegramBound] = useState(false);
+  const [telegramUsername, setTelegramUsername] = useState('');
+  const [telegramBindCode, setTelegramBindCode] = useState('');
+  const [telegramDeepLink, setTelegramDeepLink] = useState('');
+  const [telegramBindingBusy, setTelegramBindingBusy] = useState(false);
 
   // 设备管理状态
   const [devices, setDevices] = useState<any[]>([]);
@@ -315,6 +321,7 @@ export const UserMenu: React.FC = () => {
   const animeDataSourceOptions = [
     { value: 'direct', label: '直连（浏览器直连 Bangumi）' },
     { value: 'server-proxy', label: '服务器代理（由服务器访问 Bangumi）' },
+    { value: 'sakura', label: '桜色镜像站（bangumi.lol）' },
     { value: 'custom-baseurl', label: '自定义 Base URL' },
   ];
 
@@ -851,7 +858,8 @@ export const UserMenu: React.FC = () => {
       const savedDownloadMode = localStorage.getItem('downloadMode');
       if (
         savedDownloadMode === 'browser' ||
-        savedDownloadMode === 'filesystem'
+        savedDownloadMode === 'filesystem' ||
+        savedDownloadMode === 'indexeddb'
       ) {
         setDownloadMode(savedDownloadMode);
       }
@@ -895,10 +903,40 @@ export const UserMenu: React.FC = () => {
         );
         setPushNotifications(Boolean(pushData.pushNotifications));
       }
+
+      const telegramResponse = await fetch('/api/telegram/bind');
+      if (telegramResponse.ok) {
+        const telegramData = await telegramResponse.json();
+        setTelegramEnabled(Boolean(telegramData.enabled));
+        setTelegramBound(Boolean(telegramData.binding));
+        setTelegramUsername(telegramData.binding?.telegramUsername || '');
+      }
     } catch (error) {
       console.error('加载通知设置失败:', error);
     } finally {
       setEmailSettingsLoading(false);
+    }
+  };
+
+  const handleCreateTelegramBindCode = async () => {
+    setTelegramBindingBusy(true);
+    setEmailSettingsMessage('');
+    setEmailSettingsMessageType(null);
+    try {
+      const response = await fetch('/api/telegram/bind', { method: 'POST' });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(data.error || '生成 Telegram 绑定码失败');
+      }
+      setTelegramBindCode(data.code || '');
+      setTelegramDeepLink(data.deepLink || '');
+      setEmailSettingsMessage('Telegram 绑定码已生成，请在 10 分钟内完成绑定');
+      setEmailSettingsMessageType('success');
+    } catch (error) {
+      setEmailSettingsMessage(error instanceof Error ? error.message : '生成 Telegram 绑定码失败');
+      setEmailSettingsMessageType('error');
+    } finally {
+      setTelegramBindingBusy(false);
     }
   };
 
@@ -1372,8 +1410,21 @@ export const UserMenu: React.FC = () => {
   const handleQrLoginResult = useCallback((rawValue: string) => {
     try {
       const url = new URL(rawValue, window.location.origin);
+
+      const isLocalRemoteUrl =
+        (url.protocol === 'http:' || url.protocol === 'https:') &&
+        url.searchParams.has('token') &&
+        (url.pathname === '/remote' || url.pathname.endsWith('/remote'));
+
+      if (isLocalRemoteUrl) {
+        setTvQrScannerStatus('识别成功，正在打开局域网遥控器...');
+        stopTvQrScanner();
+        window.location.href = url.href;
+        return true;
+      }
+
       if (url.origin !== window.location.origin || url.pathname !== '/qr-login') {
-        setTvQrScannerError('未识别到本站电视登录二维码，请扫描电视屏幕上的二维码。');
+        setTvQrScannerError('未识别到电视登录二维码或局域网遥控二维码，请扫描电视屏幕上的二维码。');
         return false;
       }
 
@@ -1388,7 +1439,7 @@ export const UserMenu: React.FC = () => {
       window.location.href = `/qr-login?token=${encodeURIComponent(token)}`;
       return true;
     } catch {
-      setTvQrScannerError('二维码内容无效，请扫描电视端显示的登录二维码。');
+      setTvQrScannerError('二维码内容无效，请扫描电视端显示的登录二维码或局域网遥控二维码。');
       return false;
     }
   }, [stopTvQrScanner]);
@@ -1424,7 +1475,7 @@ export const UserMenu: React.FC = () => {
       await tvQrVideoRef.current.play();
 
       const detector = new BarcodeDetectorCtor({ formats: ['qr_code'] });
-      setTvQrScannerStatus('请将电视屏幕上的登录二维码放入取景框');
+      setTvQrScannerStatus('请将电视屏幕上的登录二维码或局域网遥控二维码放入取景框');
 
       const scan = async () => {
         if (tvQrScanStopRef.current || !tvQrVideoRef.current) return;
@@ -1631,7 +1682,7 @@ export const UserMenu: React.FC = () => {
     return seconds > 0 ? `${minutes}分${seconds}秒` : `${minutes}分钟`;
   };
 
-  const handleDownloadModeChange = (mode: 'browser' | 'filesystem') => {
+  const handleDownloadModeChange = (mode: 'browser' | 'filesystem' | 'indexeddb') => {
     // 如果选择 filesystem 模式，先检测浏览器是否支持
     if (
       mode === 'filesystem' &&
@@ -3678,6 +3729,21 @@ export const UserMenu: React.FC = () => {
                           File System API（保存分片到本地目录）
                         </span>
                       </label>
+                      <label className='flex items-start gap-2 cursor-pointer'>
+                        <input
+                          type='radio'
+                          name='downloadMode'
+                          value='indexeddb'
+                          checked={downloadMode === 'indexeddb'}
+                          onChange={() =>
+                            handleDownloadModeChange('indexeddb')
+                          }
+                          className='mt-0.5 w-4 h-4 text-green-500'
+                        />
+                        <span className='text-sm text-gray-700 dark:text-gray-300'>
+                          IndexedDB 缓存（应用内离线播放）
+                        </span>
+                      </label>
                     </div>
 
                     {/* 保存路径选择（仅在 filesystem 模式显示） */}
@@ -4408,8 +4474,8 @@ export const UserMenu: React.FC = () => {
                     <Smartphone className='h-4 w-4' />
                     手机相机扫码
                   </div>
-                  <h3 className='mt-3 text-2xl font-black'>扫描电视登录二维码</h3>
-                  <p className='mt-1 text-sm text-white/75'>识别成功后会进入手机确认登录页</p>
+                  <h3 className='mt-3 text-2xl font-black'>扫描电视二维码</h3>
+                  <p className='mt-1 text-sm text-white/75'>支持扫码登录，也支持打开局域网遥控器</p>
                 </div>
                 <button
                   type='button'
@@ -4670,7 +4736,7 @@ export const UserMenu: React.FC = () => {
               </div>
                 <p className='mt-5 text-sm leading-6 text-slate-600 dark:text-slate-400'>
                 {tvModeEnabled
-                  ? '电视端打开 /tv 后会显示二维码；手机在这里打开相机扫描并确认登录。'
+                  ? '电视端打开 /tv 后可扫码登录；在电视端“我的”页也可扫描局域网遥控二维码。'
                   : '当前部署未开启 TV 模式，/tv 页面和 Web 电视遥控不可用。'}
               </p>
               {!tvModeEnabled && (
@@ -4685,7 +4751,7 @@ export const UserMenu: React.FC = () => {
                   disabled={!tvModeEnabled}
                   className='inline-flex w-full cursor-pointer items-center justify-center gap-2 rounded-xl bg-rose-600 px-4 py-3 text-sm font-black text-white transition hover:bg-rose-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-500/70 disabled:cursor-not-allowed disabled:bg-slate-300 disabled:text-slate-500 dark:disabled:bg-white/10 dark:disabled:text-slate-500'
                 >
-                  打开相机扫码登录
+                  打开相机扫码
                   <Smartphone className='h-4 w-4' />
                 </button>
                 <button
@@ -5247,6 +5313,13 @@ export const UserMenu: React.FC = () => {
         pushNotificationsSupported={pushNotificationsSupported}
         pushNotificationsConfigured={pushNotificationsConfigured}
         pushNotificationsBusy={pushNotificationsBusy}
+        telegramEnabled={telegramEnabled}
+        telegramBound={telegramBound}
+        telegramUsername={telegramUsername}
+        telegramBindCode={telegramBindCode}
+        telegramDeepLink={telegramDeepLink}
+        telegramBindingBusy={telegramBindingBusy}
+        onCreateTelegramBindCode={handleCreateTelegramBindCode}
         emailSettingsLoading={emailSettingsLoading}
         emailSettingsSaving={emailSettingsSaving}
         onSave={handleSaveEmailSettings}

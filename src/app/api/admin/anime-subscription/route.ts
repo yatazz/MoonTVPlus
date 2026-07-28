@@ -52,7 +52,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: '无权限访问' }, { status: 403 });
     }
 
-    const { title, filterText, source, enabled, lastEpisode } =
+    const { title, filterText, excludeText, source, enabled, lastEpisode } =
       await req.json();
 
     // 验证必填字段
@@ -61,7 +61,7 @@ export async function POST(req: NextRequest) {
     }
 
     // 验证 source
-    if (!['acgrip', 'mikan', 'dmhy'].includes(source)) {
+    if (!['acgrip', 'mikan', 'dmhy', 'nyaa'].includes(source)) {
       return NextResponse.json({ error: '无效的搜索源' }, { status: 400 });
     }
 
@@ -93,6 +93,7 @@ export async function POST(req: NextRequest) {
       id: crypto.randomUUID(),
       title: title.trim(),
       filterText: filterText.trim(),
+      excludeText: typeof excludeText === 'string' ? excludeText.trim() : '',
       source,
       enabled: enabled ?? true,
       lastCheckTime: 0,

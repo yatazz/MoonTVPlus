@@ -205,6 +205,12 @@ export async function GET(request: NextRequest) {
 
       // 3. 从 metainfo 中获取元数据
       const { getTMDBImageUrl } = await import('@/lib/tmdb.search');
+      const { resolvePathMeta } = await import('@/lib/openlist-path-meta');
+      // folderName 为 metainfo 完整路径，PathMeta 最长前缀匹配
+      const pathMetaResolved = resolvePathMeta(
+        folderName,
+        openListConfig.PathMeta
+      );
 
       const result = {
         source: 'openlist',
@@ -218,6 +224,8 @@ export async function GET(request: NextRequest) {
         episodes: episodes.map((ep) => `/api/openlist/play?folder=${encodeURIComponent(folderName)}&fileName=${encodeURIComponent(ep.fileName)}`),
         episodes_titles: episodes.map((ep) => ep.title),
         proxyMode: false, // openlist 源不使用代理模式
+        category: pathMetaResolved.category || undefined,
+        refresh14m: pathMetaResolved.refresh14m,
       };
 
       return NextResponse.json(result);

@@ -5,10 +5,14 @@ import android.app.Activity;
 import android.graphics.Bitmap;
 import android.net.http.SslError;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.view.View;
+import android.view.KeyEvent;
 import android.view.ViewGroup;
 import android.view.Window;
 import android.view.WindowManager;
+import android.webkit.JavascriptInterface;
 import android.webkit.SslErrorHandler;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceError;
@@ -18,11 +22,15 @@ import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.widget.FrameLayout;
 
-public class MainActivity extends Activity {
+import java.net.URLEncoder;
+
+public class MainActivity extends Activity implements RemoteCommandHandler {
     private FrameLayout root;
     private WebView webView;
     private View customView;
     private WebChromeClient.CustomViewCallback customViewCallback;
+    private LocalRemoteServer localRemoteServer;
+    private final Handler mainHandler = new Handler(Looper.getMainLooper());
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -41,7 +49,8 @@ public class MainActivity extends Activity {
         root = new FrameLayout(this);
         setContentView(root);
         setupWebView();
-        webView.loadUrl(buildTvUrl(BuildConfig.BASE_URL));
+        setupLocalRemoteServer();
+        webView.loadUrl(withLocalRemoteHash(buildTvUrl(BuildConfig.BASE_URL)));
     }
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -50,6 +59,7 @@ public class MainActivity extends Activity {
         webView.setFocusable(true);
         webView.setFocusableInTouchMode(true);
         webView.requestFocus();
+        webView.addJavascriptInterface(new LocalRemoteBridge(), "MoonTVLocalRemote");
         root.addView(webView, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT
@@ -89,6 +99,12 @@ public class MainActivity extends Activity {
             }
 
             @Override
+            public void onPageFinished(WebView view, String url) {
+                super.onPageFinished(view, url);
+                injectLocalRemoteInfo();
+            }
+
+            @Override
             public void onReceivedSslError(WebView view, SslErrorHandler handler, SslError error) {
                 handler.cancel();
             }
@@ -115,6 +131,91 @@ public class MainActivity extends Activity {
                 hideCustomView();
             }
         });
+    }
+
+
+
+    private class LocalRemoteBridge {
+        @JavascriptInterface
+        public String getRemoteUrl() {
+            return localRemoteServer == null ? "" : String.valueOf(localRemoteServer.getRemoteUrl());
+        }
+
+        @JavascriptInterface
+        public int getPort() {
+            return localRemoteServer == null ? -1 : localRemoteServer.getPort();
+        }
+
+    }
+
+    private void injectLocalRemoteInfo() {
+        if (webView == null || localRemoteServer == null) return;
+        String url = localRemoteServer.getRemoteUrl();
+        if (url == null) return;
+        String safeUrl = url.replace("\\", "\\\\").replace("'", "\\'");
+        String script = "window.__MOONTV_LOCAL_REMOTE_URL='" + safeUrl + "';" +
+                "window.dispatchEvent(new CustomEvent('moontv:local-remote-info',{detail:{url:'" + safeUrl + "'}}));";
+        webView.evaluateJavascript(script, null);
+    }
+
+    private void setupLocalRemoteServer() {
+        localRemoteServer = new LocalRemoteServer(this);
+        localRemoteServer.start();
+    }
+
+    private int keyCodeForRemoteKey(String key, String digit) {
+        if ("up".equals(key)) return KeyEvent.KEYCODE_DPAD_UP;
+        if ("down".equals(key)) return KeyEvent.KEYCODE_DPAD_DOWN;
+        if ("left".equals(key)) return KeyEvent.KEYCODE_DPAD_LEFT;
+        if ("right".equals(key)) return KeyEvent.KEYCODE_DPAD_RIGHT;
+        if ("ok".equals(key)) return KeyEvent.KEYCODE_DPAD_CENTER;
+        if ("back".equals(key)) return KeyEvent.KEYCODE_BACK;
+        if ("menu".equals(key)) return KeyEvent.KEYCODE_MENU;
+        if ("home".equals(key)) return KeyEvent.KEYCODE_HOME;
+        if ("playPause".equals(key)) return KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE;
+        if ("pageUp".equals(key)) return KeyEvent.KEYCODE_PAGE_UP;
+        if ("pageDown".equals(key)) return KeyEvent.KEYCODE_PAGE_DOWN;
+        if ("digit".equals(key) && digit != null && digit.length() == 1 && digit.charAt(0) >= '0' && digit.charAt(0) <= '9') {
+            return KeyEvent.KEYCODE_0 + (digit.charAt(0) - '0');
+        }
+        return KeyEvent.KEYCODE_UNKNOWN;
+    }
+
+
+    private void dispatchLocalRemoteKey(String key, boolean repeat, String digit) {
+        if (webView == null || key == null) return;
+        String safeKey = key.replace("\\", "\\\\").replace("'", "\\'");
+        String safeDigit = digit == null ? "" : digit.replace("\\", "\\\\").replace("'", "\\'");
+        String script = "window.dispatchEvent(new CustomEvent('moontv:local-remote-key',{detail:{key:'"
+                + safeKey + "',repeat:" + (repeat ? "true" : "false") + ",digit:'" + safeDigit + "'}}));";
+        webView.evaluateJavascript(script, null);
+    }
+
+    @Override
+    public void onRemoteKey(String key, boolean repeat, String digit) {
+        mainHandler.post(() -> dispatchLocalRemoteKey(key, repeat, digit));
+    }
+
+    @Override
+    public void onRemoteText(String mode, String text) {
+        mainHandler.post(() -> {
+            if (webView == null) return;
+            String safeMode = mode == null ? "replace" : mode.replace("\\", "\\\\").replace("'", "\\'");
+            String safeText = text == null ? "" : text.replace("\\", "\\\\").replace("'", "\\'").replace("\n", "\\n").replace("\r", "");
+            String script = "window.dispatchEvent(new CustomEvent('moontv:local-remote-text',{detail:{mode:'" + safeMode + "',text:'" + safeText + "'}}));";
+            webView.evaluateJavascript(script, null);
+        });
+    }
+
+
+    private String withLocalRemoteHash(String url) {
+        String remoteUrl = localRemoteServer == null ? null : localRemoteServer.getRemoteUrl();
+        if (remoteUrl == null || remoteUrl.isEmpty()) return url;
+        try {
+            return url + "#localRemoteUrl=" + URLEncoder.encode(remoteUrl, "UTF-8");
+        } catch (Exception ignored) {
+            return url;
+        }
     }
 
     private static String buildTvUrl(String baseUrl) {
@@ -178,6 +279,10 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        if (localRemoteServer != null) {
+            localRemoteServer.stop();
+            localRemoteServer = null;
+        }
         if (webView != null) {
             root.removeView(webView);
             webView.destroy();

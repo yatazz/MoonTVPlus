@@ -3,10 +3,17 @@
  * 基于 M3U8Download 项目改造为 TypeScript 版本
  */
 
-// @ts-ignore - mux.js 没有类型定义
+// @ts-expect-error - mux.js 没有类型定义
 import * as muxjs from 'mux.js';
 
 import { AESDecryptor } from './aes-decryptor';
+import {
+  buildIndexedDBVideoCacheKey,
+  deleteIndexedDBVideoCache,
+  getIndexedDBVideoCacheSize,
+  saveIndexedDBVideoManifest,
+  saveIndexedDBVideoSegment,
+} from './indexeddb-video-cache';
 
 export type M3U8SegmentLogStatus =
   | 'queued'
@@ -65,8 +72,9 @@ export interface M3U8DownloadTask {
   };
   //禁止SzeMeng76抄袭狗抄袭
   // File System API 相关字段
-  downloadMode?: 'browser' | 'filesystem';
+  downloadMode?: 'browser' | 'filesystem' | 'indexeddb';
   filesystemDirHandle?: FileSystemDirectoryHandle;
+  indexedDBCacheKey?: string;
   m3u8Content?: string; // 原始 M3U8 内容，用于生成本地播放列表
   // 视频标识信息（用于区分不同视频）
   source?: string;
@@ -292,6 +300,11 @@ export class M3U8Downloader {
       await this.deleteFilesystemTask(task);
     }
 
+    // 如果是 indexeddb 模式且任务未完成，删除独立视频缓存库中的分片
+    if (task.downloadMode === 'indexeddb' && task.status !== 'done') {
+      await this.deleteIndexedDBTask(task);
+    }
+
     this.tasks.delete(taskId);
 
     if (this.currentTask?.id === taskId) {
@@ -320,6 +333,21 @@ export class M3U8Downloader {
     } catch (error) {
       // 如果目录不存在或删除失败，忽略错误
       console.warn('删除文件失败（可能目录不存在）:', error);
+    }
+  }
+
+  /**
+   * 删除 IndexedDB 模式下的任务缓存
+   */
+  private async deleteIndexedDBTask(task: M3U8DownloadTask): Promise<void> {
+    const cacheKey = this.getIndexedDBCacheKey(task);
+    if (!cacheKey) return;
+
+    try {
+      await deleteIndexedDBVideoCache(cacheKey);
+      console.log(`已删除未完成的 IndexedDB 视频缓存: ${cacheKey}`);
+    } catch (error) {
+      console.warn('删除 IndexedDB 视频缓存失败:', error);
     }
   }
 
@@ -570,84 +598,72 @@ export class M3U8Downloader {
       data = this.aesDecrypt(task, data, index);
     }
 
-    // MP4 转码（如果需要）
-    if (task.type === 'MP4') {
-      this.conversionMp4(task, data, index, (convertedData) => {
-        if (task.downloadMode === 'filesystem') {
-          // File System API 模式：保存分片到文件系统
-          this.saveSegmentToFilesystem(task, convertedData, index).then(() => {
-            task.finishList[index].status = 'is-success';
-            task.finishNum++;
-            this.options.onProgress?.(task);
-
-            if (task.finishNum === task.rangeDownload.targetSegment) {
-              task.status = 'done';
-              this.generateLocalPlaylist(task);
-              this.options.onComplete?.(task);
-            }
-
-            callback();
-          }).catch((error) => {
-            console.error('保存分片失败:', error);
-            task.finishList[index].status = 'is-error';
-            task.errorNum++;
-            callback();
-          });
-        } else {
-          // 浏览器下载模式：保存到内存
-          task.mediaFileList[index] = convertedData;
-          task.finishList[index].status = 'is-success';
-          task.finishNum++;
-
-          this.options.onProgress?.(task);
-
-          if (task.finishNum === task.rangeDownload.targetSegment) {
-            task.status = 'done';
-            this.downloadFile(task);
-            this.options.onComplete?.(task);
-          }
-
-          callback();
-        }
-      });
-    } else {
-      if (task.downloadMode === 'filesystem') {
-        // File System API 模式：保存分片到文件系统
-        this.saveSegmentToFilesystem(task, data, index).then(() => {
-          task.finishList[index].status = 'is-success';
-          task.finishNum++;
-          this.options.onProgress?.(task);
-
-          if (task.finishNum === task.rangeDownload.targetSegment) {
-            task.status = 'done';
-            this.generateLocalPlaylist(task);
-            this.options.onComplete?.(task);
-          }
-
-          callback();
-        }).catch((error) => {
+    const persistSegment = (processedData: ArrayBuffer) => {
+      this.saveProcessedSegment(task, processedData, index)
+        .then(() => this.markSegmentSuccess(task, index))
+        .then(() => callback())
+        .catch((error) => {
           console.error('保存分片失败:', error);
           task.finishList[index].status = 'is-error';
           task.errorNum++;
+          this.options.onError?.(task, `保存分片 ${index + 1} 失败: ${error}`);
           callback();
         });
-      } else {
-        // 浏览器下载模式：保存到内存
-        task.mediaFileList[index] = data;
-        task.finishList[index].status = 'is-success';
-        task.finishNum++;
+    };
 
-        this.options.onProgress?.(task);
-
-        if (task.finishNum === task.rangeDownload.targetSegment) {
-          task.status = 'done';
-          this.downloadFile(task);
-          this.options.onComplete?.(task);
-        }
-
-        callback();
-      }
+    // MP4 转码（如果需要）
+    if (task.type === 'MP4') {
+      this.conversionMp4(task, data, index, persistSegment);
+    } else {
+      persistSegment(data);
     }
+  }
+
+  /**
+   * 按当前下载模式持久化分片
+   */
+  private async saveProcessedSegment(
+    task: M3U8DownloadTask,
+    data: ArrayBuffer,
+    index: number
+  ): Promise<void> {
+    if (task.downloadMode === 'filesystem') {
+      await this.saveSegmentToFilesystem(task, data, index);
+      return;
+    }
+
+    if (task.downloadMode === 'indexeddb') {
+      await this.saveSegmentToIndexedDB(task, data, index);
+      return;
+    }
+
+    // 浏览器下载模式：保存到内存，完成后合并触发浏览器下载
+    task.mediaFileList[index] = data;
+  }
+
+  /**
+   * 标记分片成功，并在全部完成后执行对应模式的收尾动作
+   */
+  private async markSegmentSuccess(task: M3U8DownloadTask, index: number): Promise<void> {
+    task.finishList[index].status = 'is-success';
+    task.finishNum++;
+
+    this.options.onProgress?.(task);
+
+    if (task.finishNum !== task.rangeDownload.targetSegment) {
+      return;
+    }
+
+    if (task.downloadMode === 'filesystem') {
+      await this.generateLocalPlaylist(task);
+    } else if (task.downloadMode === 'indexeddb') {
+      await this.generateIndexedDBPlaylist(task);
+    } else {
+      this.downloadFile(task);
+    }
+
+    task.status = 'done';
+    this.options.onComplete?.(task);
   }
 
   /**
@@ -846,7 +862,6 @@ export class M3U8Downloader {
   ): void {
     if (task.type === 'MP4') {
       try {
-        // @ts-ignore - mux.js 的 Transmuxer 在 mp4 子模块下
         const transMuxer = new muxjs.mp4.Transmuxer({
           keepOriginalTimestamps: true,
           duration: parseInt(task.durationSecond.toString()),
@@ -889,6 +904,49 @@ export class M3U8Downloader {
       }
     });
     task.requests = [];
+  }
+
+  /**
+   * 获取 IndexedDB 视频缓存 Key
+   */
+  private getIndexedDBCacheKey(task: M3U8DownloadTask): string | null {
+    if (task.indexedDBCacheKey) {
+      return task.indexedDBCacheKey;
+    }
+
+    if (task.source && task.videoId && task.episodeIndex !== undefined) {
+      task.indexedDBCacheKey = buildIndexedDBVideoCacheKey(
+        task.source,
+        task.videoId,
+        task.episodeIndex
+      );
+      return task.indexedDBCacheKey;
+    }
+
+    // 缺少业务标识时仍允许缓存任务，但无法在 play 页面按剧集自动命中
+    task.indexedDBCacheKey = `task::${task.id}`;
+    return task.indexedDBCacheKey;
+  }
+
+  /**
+   * 保存分片到独立 IndexedDB 视频缓存库
+   */
+  private async saveSegmentToIndexedDB(
+    task: M3U8DownloadTask,
+    data: ArrayBuffer,
+    index: number
+  ): Promise<void> {
+    const cacheKey = this.getIndexedDBCacheKey(task);
+    if (!cacheKey) {
+      throw new Error('无法生成 IndexedDB 视频缓存 Key');
+    }
+
+    await saveIndexedDBVideoSegment({
+      cacheKey,
+      index,
+      data,
+      mimeType: task.type === 'MP4' ? 'video/mp4' : 'video/MP2T',
+    });
   }
 
   //禁止SzeMeng76抄袭狗抄袭
@@ -1008,6 +1066,67 @@ export class M3U8Downloader {
     } catch (error) {
       console.error('生成播放列表失败:', error);
     }
+  }
+
+  /**
+   * 生成 IndexedDB 本地 M3U8 播放列表并保存缓存清单
+   */
+  private async generateIndexedDBPlaylist(task: M3U8DownloadTask): Promise<void> {
+    const cacheKey = this.getIndexedDBCacheKey(task);
+    if (!cacheKey || !task.m3u8Content) {
+      throw new Error('无法生成 IndexedDB 播放列表：缺少缓存 Key 或 M3U8 内容');
+    }
+
+    if (!task.source || !task.videoId || task.episodeIndex === undefined) {
+      throw new Error('无法生成 IndexedDB 播放列表：缺少视频标识信息');
+    }
+
+    const lines = task.m3u8Content.split('\n');
+    const modifiedLines: string[] = [];
+    let segmentIndex = task.rangeDownload.startSegment;
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      const trimmedLine = line.trim();
+
+      // 下载器会先解密再持久化分片，因此本地播放列表不再保留密钥行，
+      // 避免播放器对已解密分片二次解密。
+      if (
+        trimmedLine.startsWith('#EXT-X-KEY:') &&
+        task.aesConf.method &&
+        task.aesConf.method !== 'NONE'
+      ) {
+        continue;
+      }
+
+      if (trimmedLine && !trimmedLine.startsWith('#')) {
+        if (segmentIndex < task.rangeDownload.endSegment) {
+          const indent = line.match(/^\s*/)?.[0] || '';
+          const filename = `segment_${segmentIndex.toString().padStart(5, '0')}.ts`;
+          modifiedLines.push(indent + filename);
+          segmentIndex++;
+        } else {
+          modifiedLines.push(line);
+        }
+      } else {
+        modifiedLines.push(line);
+      }
+    }
+
+    const totalSize = await getIndexedDBVideoCacheSize(cacheKey);
+    await saveIndexedDBVideoManifest({
+      cacheKey,
+      source: task.source,
+      videoId: task.videoId,
+      episodeIndex: task.episodeIndex,
+      title: task.title,
+      playlistContent: modifiedLines.join('\n'),
+      m3u8Content: task.m3u8Content,
+      segmentCount: task.rangeDownload.targetSegment,
+      completed: true,
+      mimeType: task.type === 'MP4' ? 'video/mp4' : 'video/MP2T',
+      totalSize,
+    });
   }
 
   //禁止SzeMeng76抄袭狗抄袭

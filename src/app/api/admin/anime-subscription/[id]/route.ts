@@ -40,8 +40,12 @@ export async function PUT(
     if (updates.filterText !== undefined) {
       subscription.filterText = updates.filterText.trim();
     }
+    if (updates.excludeText !== undefined) {
+      subscription.excludeText =
+        typeof updates.excludeText === 'string' ? updates.excludeText.trim() : '';
+    }
     if (updates.source !== undefined) {
-      if (!['acgrip', 'mikan', 'dmhy'].includes(updates.source)) {
+      if (!['acgrip', 'mikan', 'dmhy', 'nyaa'].includes(updates.source)) {
         return NextResponse.json({ error: '无效的搜索源' }, { status: 400 });
       }
       subscription.source = updates.source;
