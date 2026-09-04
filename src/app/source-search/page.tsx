@@ -4,6 +4,7 @@
 import { Loader2, Search } from 'lucide-react';
 import { Suspense, useEffect, useRef, useState } from 'react';
 
+import { isAnimeCategoryText } from '@/lib/anime-keyword-expr';
 import { ApiSite } from '@/lib/config';
 import { appendSpecialSourceParam } from '@/lib/special-source.client';
 import { SearchResult } from '@/lib/types';
@@ -359,6 +360,11 @@ function SourceSearchPageClient() {
                         year={item.year}
                         from='source-search'
                         type={item.episodes.length > 1 ? 'tv' : 'movie'}
+                        isAnime={isAnimeCategoryText(
+                          item.type_name,
+                          item.class
+                        )}
+                        typeName={item.type_name || item.class}
                         cmsData={{
                           desc: item.desc,
                           episodes: item.episodes,

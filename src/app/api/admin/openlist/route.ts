@@ -11,6 +11,7 @@ import {
   normalizePathMetaMap,
   type OpenListPathMetaMap,
 } from '@/lib/openlist-path-meta';
+import { normalizeApiBaseUrl } from '@/lib/url';
 
 export const runtime = 'nodejs';
 
@@ -82,18 +83,20 @@ export async function POST(request: NextRequest) {
 
     if (action === 'save') {
       const cleanedPathMeta = parsePathMeta(PathMeta);
+      const normalizedURL = normalizeApiBaseUrl(URL);
+      const normalizedOfflineDownloadURL = normalizeApiBaseUrl(OfflineDownloadURL);
 
       // 如果功能未启用，允许保存空配置
       if (!Enabled) {
         adminConfig.OpenListConfig = {
           Enabled: false,
-          URL: URL || '',
+          URL: normalizedURL,
           Username: Username || '',
           Password: Password || '',
           RootPaths: RootPaths || ['/'],
           OfflineDownloadPath: OfflineDownloadPath || '/',
           OfflineDownloadUseCustomSource: OfflineDownloadUseCustomSource || false,
-          OfflineDownloadURL: OfflineDownloadURL || '',
+          OfflineDownloadURL: normalizedOfflineDownloadURL,
           OfflineDownloadUsername: OfflineDownloadUsername || '',
           OfflineDownloadPassword: OfflineDownloadPassword || '',
           LastRefreshTime: adminConfig.OpenListConfig?.LastRefreshTime,
@@ -113,7 +116,7 @@ export async function POST(request: NextRequest) {
       }
 
       // 功能启用时，验证必填字段
-      if (!URL || !Username || !Password) {
+      if (!normalizedURL || !Username || !Password) {
         return NextResponse.json(
           { error: '请提供 URL、账号和密码' },
           { status: 400 }
@@ -122,7 +125,9 @@ export async function POST(request: NextRequest) {
 
       if (
         OfflineDownloadUseCustomSource &&
-        (!OfflineDownloadURL || !OfflineDownloadUsername || !OfflineDownloadPassword)
+        (!normalizedOfflineDownloadURL ||
+          !OfflineDownloadUsername ||
+          !OfflineDownloadPassword)
       ) {
         return NextResponse.json(
           { error: '请提供离线下载 OpenList URL、账号和密码' },
@@ -153,7 +158,7 @@ export async function POST(request: NextRequest) {
       // 验证账号密码是否正确
       try {
         console.log('[OpenList Config] 验证账号密码');
-        await OpenListClient.login(URL, Username, Password);
+        await OpenListClient.login(normalizedURL, Username, Password);
         console.log('[OpenList Config] 账号密码验证成功');
       } catch (error) {
         console.error('[OpenList Config] 账号密码验证失败:', error);
@@ -167,7 +172,7 @@ export async function POST(request: NextRequest) {
         try {
           console.log('[OpenList Config] 验证离线下载 OpenList 账号密码');
           await OpenListClient.login(
-            OfflineDownloadURL,
+            normalizedOfflineDownloadURL,
             OfflineDownloadUsername,
             OfflineDownloadPassword
           );
@@ -183,13 +188,13 @@ export async function POST(request: NextRequest) {
 
       adminConfig.OpenListConfig = {
         Enabled: true,
-        URL,
+        URL: normalizedURL,
         Username,
         Password,
         RootPaths: cleanedRootPaths,
         OfflineDownloadPath: OfflineDownloadPath || '/',
         OfflineDownloadUseCustomSource: OfflineDownloadUseCustomSource || false,
-        OfflineDownloadURL: OfflineDownloadURL || '',
+        OfflineDownloadURL: normalizedOfflineDownloadURL,
         OfflineDownloadUsername: OfflineDownloadUsername || '',
         OfflineDownloadPassword: OfflineDownloadPassword || '',
         LastRefreshTime: adminConfig.OpenListConfig?.LastRefreshTime,

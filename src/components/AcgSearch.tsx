@@ -1,7 +1,14 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 'use client';
 
-import { AlertCircle, Download, ExternalLink, Loader2 } from 'lucide-react';
+import {
+  Activity,
+  AlertCircle,
+  Copy,
+  Download,
+  ExternalLink,
+  Loader2,
+} from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import CapsuleSwitch from '@/components/CapsuleSwitch';
@@ -15,6 +22,19 @@ interface AcgSearchItem {
   torrentUrl: string;
   description: string;
   images: string[];
+}
+
+type MagnetHealthLevel = 'good' | 'ok' | 'risk' | 'unknown';
+
+interface MagnetHealthView {
+  health: MagnetHealthLevel;
+  seeders: number;
+  leechers: number;
+  peers: number;
+  message: string;
+  infoHash?: string;
+  source?: 'scrape' | 'cache';
+  durationMs?: number;
 }
 
 interface AcgSearchResult {
@@ -34,6 +54,35 @@ interface AcgSearchProps {
 
 type AcgSearchSource = 'acgrip' | 'mikan' | 'dmhy' | 'nyaa';
 type DownloadTool = 'aria2' | 'Transmission' | 'qBittorrent';
+
+/** 把可能的 xml 对象/空值收成稳定字符串，避免 key 变成 [object Object] */
+function asItemText(value: unknown): string {
+  if (typeof value === 'string') return value.trim();
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  if (value && typeof value === 'object') {
+    const obj = value as Record<string, unknown>;
+    if (typeof obj._ === 'string') return obj._.trim();
+    if (typeof obj.url === 'string') return obj.url.trim();
+    if (typeof (obj as any).$?.url === 'string') return String((obj as any).$.url).trim();
+  }
+  return '';
+}
+
+/** 单条列表行身份：业务字段 + index，避免 guid 冲突导致整表联动 */
+function getAcgItemId(item: AcgSearchItem, index?: number): string {
+  const torrentUrl = asItemText(item.torrentUrl);
+  const link = asItemText(item.link);
+  const guid = asItemText(item.guid);
+  const title = asItemText(item.title);
+  const pubDate = asItemText(item.pubDate);
+  const base =
+    torrentUrl ||
+    link ||
+    guid ||
+    (title || pubDate ? `${title}|${pubDate}` : 'acg-item');
+  if (typeof index === 'number') return `${base}#${index}`;
+  return base;
+}
 
 const downloadToolOptions: Array<{ value: DownloadTool; label: string }> = [
   { value: 'aria2', label: 'aria2' },
@@ -73,11 +122,18 @@ export default function AcgSearch({
   const [currentPage, setCurrentPage] = useState(1);
   const [hasMore, setHasMore] = useState(true);
   const [downloadingId, setDownloadingId] = useState<string | null>(null);
+  const [copyingId, setCopyingId] = useState<string | null>(null);
   const [showNameDialog, setShowNameDialog] = useState(false);
   const [selectedItem, setSelectedItem] = useState<AcgSearchItem | null>(null);
   const [customName, setCustomName] = useState('');
   const [downloadTool, setDownloadTool] = useState<DownloadTool>('aria2');
   const [toast, setToast] = useState<ToastProps | null>(null);
+  const [healthMap, setHealthMap] = useState<Record<string, MagnetHealthView>>(
+    {}
+  );
+  const [healthCheckingIds, setHealthCheckingIds] = useState<
+    Record<string, true>
+  >({});
   const loadMoreRef = useRef<HTMLDivElement>(null);
   const isLoadingMoreRef = useRef(false);
   const didInitSourceRef = useRef(false);
@@ -141,26 +197,83 @@ export default function AcgSearch({
       }
 
       const data: AcgSearchResult = await response.json();
+      // 规范化字段，避免 guid 为对象时整表共用同一个 key
+      const normalizedItems: AcgSearchItem[] = (data.items || []).map(
+        (item, index) => {
+          const title = asItemText(item.title);
+          const link = asItemText(item.link);
+          const torrentUrl = asItemText(item.torrentUrl);
+          const pubDate = asItemText(item.pubDate);
+          const description = asItemText(item.description);
+          const guid = getAcgItemId(
+            {
+              ...item,
+              title,
+              link,
+              torrentUrl,
+              pubDate,
+              guid: asItemText(item.guid),
+              description,
+              images: Array.isArray(item.images) ? item.images : [],
+            },
+            index
+          );
+          return {
+            title,
+            link,
+            guid,
+            pubDate,
+            torrentUrl,
+            description,
+            images: Array.isArray(item.images) ? item.images : [],
+          };
+        }
+      );
 
       if (isLoadMore) {
-        // 追加新数据
-        setAllItems((prev) => [...prev, ...data.items]);
+        // 追加新数据（续页 index 用当前长度偏移，保证 key 不撞）
+        setAllItems((prev) => {
+          const offset = prev.length;
+          const appended = (data.items || []).map((item, index) => {
+            const title = asItemText(item.title);
+            const link = asItemText(item.link);
+            const torrentUrl = asItemText(item.torrentUrl);
+            const pubDate = asItemText(item.pubDate);
+            const description = asItemText(item.description);
+            const baseItem: AcgSearchItem = {
+              title,
+              link,
+              torrentUrl,
+              pubDate,
+              description,
+              guid: asItemText(item.guid),
+              images: Array.isArray(item.images) ? item.images : [],
+            };
+            return {
+              ...baseItem,
+              guid: getAcgItemId(baseItem, offset + index),
+            };
+          });
+          return [...prev, ...appended];
+        });
         // 如果当前页没有结果，说明没有更多了
         setHasMore(
           source !== 'mikan' &&
             source !== 'dmhy' &&
             source !== 'nyaa' &&
-            data.items.length > 0
+            normalizedItems.length > 0
         );
       } else {
         // 新搜索，重置数据
-        setAllItems(data.items);
+        setAllItems(normalizedItems);
+        setHealthMap({});
+        setHealthCheckingIds({});
         // 如果第一页有结果，假设可能还有更多
         setHasMore(
           source !== 'mikan' &&
             source !== 'dmhy' &&
             source !== 'nyaa' &&
-            data.items.length > 0
+            normalizedItems.length > 0
         );
       }
 
@@ -247,9 +360,87 @@ export default function AcgSearch({
     };
   }, [loadMore]);
 
+  const healthBadgeClass = (level: MagnetHealthLevel) => {
+    switch (level) {
+      case 'good':
+        return 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300';
+      case 'ok':
+        return 'bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-200';
+      case 'risk':
+        return 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300';
+      default:
+        return 'bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-300';
+    }
+  };
+
+  const healthLabel = (level: MagnetHealthLevel) => {
+    switch (level) {
+      case 'good':
+        return '健康';
+      case 'ok':
+        return '一般';
+      case 'risk':
+        return '风险';
+      default:
+        return '未知';
+    }
+  };
+
+  // 单条测活（全站并发由服务端限制；前端可同时点多条）
+  const handleCheckHealth = async (item: AcgSearchItem, index: number) => {
+    const itemId = getAcgItemId(item, index);
+    if (!item.torrentUrl || healthCheckingIds[itemId]) return;
+
+    setHealthCheckingIds((prev) => ({ ...prev, [itemId]: true }));
+    try {
+      const response = await fetch('/api/acg/health', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          url: item.torrentUrl,
+          // 已有结果时点「重新测活」跳过缓存
+          skipCache: Boolean(healthMap[itemId]),
+        }),
+      });
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.error || '测活失败');
+      }
+
+      setHealthMap((prev) => ({
+        ...prev,
+        [itemId]: {
+          health: data.health as MagnetHealthLevel,
+          seeders: data.seeders ?? 0,
+          leechers: data.leechers ?? 0,
+          peers: data.peers ?? 0,
+          message: data.message || '',
+          infoHash: data.infoHash,
+          source: data.source,
+          durationMs: data.durationMs,
+        },
+      }));
+    } catch (err: any) {
+      setToast({
+        message: err.message || '测活失败',
+        type: 'error',
+        onClose: () => setToast(null),
+      });
+    } finally {
+      setHealthCheckingIds((prev) => {
+        const next = { ...prev };
+        delete next[itemId];
+        return next;
+      });
+    }
+  };
+
   // 打开命名弹窗
-  const handleOpenDownloadDialog = (item: AcgSearchItem) => {
-    setSelectedItem(item);
+  const handleOpenDownloadDialog = (item: AcgSearchItem, index: number) => {
+    setSelectedItem({ ...item, guid: getAcgItemId(item, index) });
     setCustomName(keyword.trim());
     setShowNameDialog(true);
   };
@@ -301,6 +492,31 @@ export default function AcgSearch({
     }
   };
 
+  // 复制磁链：原样复制 RSS 里的链接（磁链复制磁链，.torrent 复制 .torrent），纯前端不走服务器
+  const handleCopyMagnet = async (item: AcgSearchItem, index: number) => {
+    const itemId = getAcgItemId(item, index);
+    const link = item.torrentUrl || item.link;
+    if (!link || copyingId === itemId) return;
+
+    setCopyingId(itemId);
+    try {
+      await navigator.clipboard.writeText(link);
+      setToast({
+        message: '链接已复制',
+        type: 'success',
+        onClose: () => setToast(null),
+      });
+    } catch (err: any) {
+      setToast({
+        message: err.message || '复制失败',
+        type: 'error',
+        onClose: () => setToast(null),
+      });
+    } finally {
+      setCopyingId(null);
+    }
+  };
+
   const renderBody = () => {
     if (loading && allItems.length === 0) {
       return (
@@ -345,9 +561,13 @@ export default function AcgSearch({
       <>
         {/* 结果列表 */}
         <div className='space-y-3'>
-          {allItems.map((item) => (
+          {allItems.map((item, index) => {
+            const itemId = getAcgItemId(item, index);
+            const health = healthMap[itemId];
+            const isHealthChecking = Boolean(healthCheckingIds[itemId]);
+            return (
             <div
-              key={item.guid}
+              key={itemId}
               className='p-4 rounded-lg bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 hover:border-green-400 dark:hover:border-green-600 transition-colors'
             >
               {/* 标题 */}
@@ -357,7 +577,9 @@ export default function AcgSearch({
 
               {/* 发布时间 */}
               <div className='mb-2 text-xs text-gray-500 dark:text-gray-400'>
-                {new Date(item.pubDate).toLocaleString('zh-CN')}
+                {item.pubDate
+                  ? new Date(item.pubDate).toLocaleString('zh-CN')
+                  : ''}
               </div>
 
               {/* 图片预览 */}
@@ -375,15 +597,42 @@ export default function AcgSearch({
                 </div>
               )}
 
+              {/* 测活结果 */}
+              {health && (
+                <div className='mb-3 flex flex-wrap items-center gap-2 text-xs'>
+                  <span
+                    className={`inline-flex items-center rounded-full px-2 py-0.5 font-medium ${healthBadgeClass(
+                      health.health
+                    )}`}
+                  >
+                    {healthLabel(health.health)}
+                  </span>
+                  <span className='text-gray-600 dark:text-gray-300'>
+                    Seeder {health.seeders}
+                    {' · '}
+                    Leecher {health.leechers}
+                    {' · '}
+                    Peer {health.peers}
+                  </span>
+                  {typeof health.durationMs === 'number' && (
+                    <span className='text-gray-400 dark:text-gray-500'>
+                      {health.source === 'cache'
+                        ? '缓存'
+                        : `${health.durationMs}ms`}
+                    </span>
+                  )}
+                </div>
+              )}
+
               {/* 操作按钮 */}
-              <div className='flex items-center gap-2'>
+              <div className='flex flex-wrap items-center gap-2'>
                 <button
-                  onClick={() => handleOpenDownloadDialog(item)}
-                  disabled={downloadingId === item.guid}
+                  onClick={() => handleOpenDownloadDialog(item, index)}
+                  disabled={downloadingId === itemId}
                   className='flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-green-600 text-white text-sm hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors'
                   title='存到私人影库'
                 >
-                  {downloadingId === item.guid ? (
+                  {downloadingId === itemId ? (
                     <>
                       <Loader2 className='h-4 w-4 animate-spin' />
                       <span>下载中...</span>
@@ -395,8 +644,39 @@ export default function AcgSearch({
                     </>
                   )}
                 </button>
+                <button
+                  onClick={() => handleCheckHealth(item, index)}
+                  disabled={!item.torrentUrl || isHealthChecking}
+                  className='flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-sky-600 text-white text-sm hover:bg-sky-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors'
+                  title='Tracker 测活（全站并发上限可由 MAGNET_HEALTH_MAX_CONCURRENT 配置）'
+                >
+                  {isHealthChecking ? (
+                    <>
+                      <Loader2 className='h-4 w-4 animate-spin' />
+                      <span>测活中...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Activity className='h-4 w-4' />
+                      <span>{health ? '重新测活' : '测活'}</span>
+                    </>
+                  )}
+                </button>
+                <button
+                  onClick={() => handleCopyMagnet(item, index)}
+                  disabled={(!item.torrentUrl && !item.link) || copyingId === itemId}
+                  className='flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-gray-200 text-gray-700 text-sm hover:bg-gray-300 dark:bg-gray-700 dark:text-gray-300 dark:hover:bg-gray-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors'
+                  title='复制磁链'
+                >
+                  {copyingId === itemId ? (
+                    <Loader2 className='h-4 w-4 animate-spin' />
+                  ) : (
+                    <Copy className='h-4 w-4' />
+                  )}
+                  <span>复制磁链</span>
+                </button>
                 <a
-                  href={item.link}
+                  href={item.link || item.torrentUrl || '#'}
                   target='_blank'
                   rel='noopener noreferrer'
                   className='flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-gray-200 text-gray-700 text-sm hover:bg-gray-300 dark:bg-gray-700 dark:text-gray-300 dark:hover:bg-gray-600 transition-colors'
@@ -407,7 +687,8 @@ export default function AcgSearch({
                 </a>
               </div>
             </div>
-          ))}
+            );
+          })}
         </div>
 
         {/* 加载更多指示器 */}

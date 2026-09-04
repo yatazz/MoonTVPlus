@@ -13,6 +13,7 @@ import {
   MangaSearchResult,
   MangaSource,
 } from './manga.types';
+import { normalizeApiBaseUrl } from './url';
 
 interface GraphQLResponse<T> {
   data?: T;
@@ -167,7 +168,7 @@ async function resolveSuwayomiConfig(options: SuwayomiClientOptions = {}): Promi
     throw new Error('Suwayomi 未配置，请先在管理面板或环境变量中设置服务地址');
   }
 
-  const normalizedBaseUrl = serverUrl.replace(/\/$/, '');
+  const normalizedBaseUrl = normalizeApiBaseUrl(serverUrl);
 
   return {
     serverBaseUrl: normalizedBaseUrl,

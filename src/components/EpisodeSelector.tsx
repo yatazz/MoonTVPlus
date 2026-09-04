@@ -2,6 +2,7 @@
 
 import { Link as LinkIcon, Settings } from 'lucide-react';
 import { useRouter } from 'next/navigation';
+import { createPortal } from 'react-dom';
 import React, {
   useCallback,
   useEffect,
@@ -21,6 +22,160 @@ import { getVideoResolutionFromM3u8 } from '@/lib/utils';
 import DanmakuPanel from '@/components/DanmakuPanel';
 import EpisodeFilterSettings from '@/components/EpisodeFilterSettings';
 import ProxyImage from '@/components/ProxyImage';
+import { useLongPress } from '@/hooks/useLongPress';
+
+/** 选集按钮上显示的短标签（数字等）；全名仍保留在 originalTitle 供长按查看 */
+function getEpisodeDisplayLabel(
+  title: string | undefined,
+  episodeNumber: number
+): string {
+  if (!title) {
+    return String(episodeNumber);
+  }
+  // OVA 单独展示
+  const ovaMatch = title.match(/OVA\s*(\d+(?:\.\d+)?)/i);
+  if (ovaMatch) {
+    return `OVA ${ovaMatch[1]}`;
+  }
+  // S01E05 / s01e05 → 5
+  const sxxexxMatch = title.match(/[Ss]\d+[Ee](\d{1,4}(?:\.\d+)?)/);
+  if (sxxexxMatch) {
+    return sxxexxMatch[1];
+  }
+  // 第12集 / 12话 → 12
+  const zhMatch = title.match(/(?:第)?(\d+(?:\.\d+)?)(?:集|话)/);
+  if (zhMatch) {
+    return zhMatch[1];
+  }
+  // [01] / (01) → 1（网盘常见）
+  const bracketMatch = title.match(/[[(【](\d+(?:\.\d+)?)[\])】]/);
+  if (bracketMatch) {
+    return bracketMatch[1];
+  }
+  // E01 / EP01 / ep.01 → 1
+  const epMatch = title.match(/(?:^|[^a-zA-Z])(?:EP|E|ep|e)[.\s_-]*(\d+(?:\.\d+)?)/);
+  if (epMatch) {
+    return epMatch[1];
+  }
+  // _01_ / -01- → 1
+  const sepMatch = title.match(/[_-](\d+(?:\.\d+)?)[_-]/);
+  if (sepMatch) {
+    return sepMatch[1];
+  }
+  // 纯数字开头：01.xxx / 01 xxx
+  const leadingNum = title.match(/^(\d+(?:\.\d+)?)[^\d.]/);
+  if (leadingNum) {
+    return leadingNum[1];
+  }
+  // 整串就是数字
+  if (/^\d+(?:\.\d+)?$/.test(title.trim())) {
+    return title.trim();
+  }
+  return title;
+}
+
+interface EpisodeNamePopupState {
+  title: string;
+  x: number;
+  y: number;
+  placement: 'top' | 'bottom';
+}
+
+interface EpisodeButtonProps {
+  episodeNumber: number;
+  isActive: boolean;
+  isWatched: boolean;
+  originalTitle?: string;
+  inactiveEpisodeClass: string;
+  /** 仅 netdisk 源启用长按/右键查看全名 */
+  enableOriginalNamePopup?: boolean;
+  onSelect: (zeroBasedIndex: number) => void;
+  onShowOriginalName: (title: string, rect: DOMRect) => void;
+}
+
+/** 单集按钮：点击选集；netdisk 时移动端长按 / 桌面右键显示原集名 popup */
+const EpisodeButton: React.FC<EpisodeButtonProps> = ({
+  episodeNumber,
+  isActive,
+  isWatched,
+  originalTitle,
+  inactiveEpisodeClass,
+  enableOriginalNamePopup = false,
+  onSelect,
+  onShowOriginalName,
+}) => {
+  const buttonRef = useRef<HTMLButtonElement>(null);
+  const displayLabel = getEpisodeDisplayLabel(originalTitle, episodeNumber);
+  // 只要返回了原始集名就允许右键/长按。即使短标签与原名相同，
+  // 也不能把按钮设为 disabled，否则 PC 端不会触发 contextmenu。
+  const canShowOriginalName =
+    enableOriginalNamePopup && !!originalTitle && originalTitle.trim() !== '';
+
+  const showOriginalName = useCallback(() => {
+    if (!canShowOriginalName || !buttonRef.current) return;
+    onShowOriginalName(originalTitle!, buttonRef.current.getBoundingClientRect());
+  }, [canShowOriginalName, onShowOriginalName, originalTitle]);
+
+  const longPressProps = useLongPress({
+    onLongPress: showOriginalName,
+    onClick: () => {
+      if (!isActive) {
+        onSelect(episodeNumber - 1);
+      }
+    },
+    longPressDelay: 500,
+  });
+
+  return (
+    <button
+      ref={buttonRef}
+      type='button'
+      // 仅在可显示原名时保持可交互，否则当前集恢复禁用状态。
+      disabled={canShowOriginalName ? undefined : isActive || undefined}
+      aria-disabled={isActive || undefined}
+      aria-current={isActive ? 'true' : undefined}
+      onClick={() => {
+        if (!isActive) {
+          onSelect(episodeNumber - 1);
+        }
+      }}
+      onContextMenu={
+        canShowOriginalName
+          ? (e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              showOriginalName();
+            }
+          : undefined
+      }
+      {...(canShowOriginalName ? longPressProps : {})}
+      className={`relative h-10 min-w-10 px-3 py-2 flex items-center justify-center text-sm font-medium rounded-md transition-all duration-200 whitespace-nowrap font-mono border ${
+        canShowOriginalName ? 'select-none' : ''
+      }
+        ${isActive
+          ? 'bg-green-500 text-white border-green-400 shadow-lg shadow-green-500/25 dark:bg-green-600 cursor-default'
+          : isWatched
+            ? 'bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100 hover:scale-105 dark:bg-emerald-900/20 dark:text-emerald-300 dark:border-emerald-700/60 dark:hover:bg-emerald-900/30'
+            : inactiveEpisodeClass
+        }`.trim()}
+      style={
+        canShowOriginalName
+          ? ({
+              WebkitUserSelect: 'none',
+              userSelect: 'none',
+              WebkitTouchCallout: 'none',
+            } as React.CSSProperties)
+          : undefined
+      }
+      title={isWatched && !isActive ? '已观看过' : undefined}
+    >
+      {isWatched && !isActive && (
+        <span className='absolute top-1 right-1 h-1.5 w-1.5 rounded-full bg-emerald-500 dark:bg-emerald-400' />
+      )}
+      {displayLabel}
+    </button>
+  );
+};
 
 // 定义视频信息类型
 interface VideoInfo {
@@ -207,6 +362,71 @@ const EpisodeSelector: React.FC<EpisodeSelectorProps> = ({
   // 标记是否正在进行初始测速
   const [isInitialTesting, setIsInitialTesting] = useState(false);
   const [watchedEpisodes, setWatchedEpisodes] = useState<Set<number>>(new Set());
+  // 选集按钮长按/右键：原集名 popup（样式参考标题上方 aka 提示）
+  const [episodeNamePopup, setEpisodeNamePopup] =
+    useState<EpisodeNamePopupState | null>(null);
+  const episodeNamePopupTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null
+  );
+
+  const clearEpisodeNamePopupTimer = useCallback(() => {
+    if (episodeNamePopupTimerRef.current) {
+      clearTimeout(episodeNamePopupTimerRef.current);
+      episodeNamePopupTimerRef.current = null;
+    }
+  }, []);
+
+  const hideEpisodeNamePopup = useCallback(() => {
+    clearEpisodeNamePopupTimer();
+    setEpisodeNamePopup(null);
+  }, [clearEpisodeNamePopupTimer]);
+
+  const showEpisodeNamePopup = useCallback(
+    (title: string, rect: DOMRect) => {
+      const gap = 8;
+      const estimatedHeight = 40;
+      const spaceAbove = rect.top;
+      const placement: 'top' | 'bottom' =
+        spaceAbove < estimatedHeight + gap ? 'bottom' : 'top';
+      const x = rect.left + rect.width / 2;
+      const y =
+        placement === 'top' ? rect.top - gap : rect.bottom + gap;
+
+      clearEpisodeNamePopupTimer();
+      setEpisodeNamePopup({ title, x, y, placement });
+      // 自动消失，避免遮挡后续操作
+      episodeNamePopupTimerRef.current = setTimeout(() => {
+        setEpisodeNamePopup(null);
+        episodeNamePopupTimerRef.current = null;
+      }, 2500);
+    },
+    [clearEpisodeNamePopupTimer]
+  );
+
+  useEffect(() => {
+    if (!episodeNamePopup) return;
+
+    const handleDismiss = () => hideEpisodeNamePopup();
+    // 下一帧再绑定，避免触发本次的右键/触摸立即关闭
+    const bindId = window.setTimeout(() => {
+      window.addEventListener('scroll', handleDismiss, true);
+      window.addEventListener('touchstart', handleDismiss, { passive: true });
+      window.addEventListener('mousedown', handleDismiss);
+      window.addEventListener('keydown', handleDismiss);
+    }, 0);
+
+    return () => {
+      window.clearTimeout(bindId);
+      window.removeEventListener('scroll', handleDismiss, true);
+      window.removeEventListener('touchstart', handleDismiss);
+      window.removeEventListener('mousedown', handleDismiss);
+      window.removeEventListener('keydown', handleDismiss);
+    };
+  }, [episodeNamePopup, hideEpisodeNamePopup]);
+
+  useEffect(() => {
+    return () => clearEpisodeNamePopupTimer();
+  }, [clearEpisodeNamePopupTimer]);
 
   // 使用 ref 来避免闭包问题
   const attemptedSourcesRef = useRef<Set<string>>(new Set());
@@ -842,51 +1062,19 @@ const EpisodeSelector: React.FC<EpisodeSelectorProps> = ({
               // 过滤掉被屏蔽的集数，但保持原有索引
               return episodes
                 .filter(episodeNumber => !isEpisodeFiltered(episodeNumber))
-                .map((episodeNumber) => {
-                  const isActive = episodeNumber === value;
-                  const isWatched = watchedEpisodes.has(episodeNumber);
-                  return (
-                    <button
-                      key={episodeNumber}
-                      disabled={isActive}
-                      onClick={() => handleEpisodeClick(episodeNumber - 1)}
-                      className={`relative h-10 min-w-10 px-3 py-2 flex items-center justify-center text-sm font-medium rounded-md transition-all duration-200 whitespace-nowrap font-mono border
-                        ${isActive
-                          ? 'bg-green-500 text-white border-green-400 shadow-lg shadow-green-500/25 dark:bg-green-600'
-                          : isWatched
-                            ? 'bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100 hover:scale-105 dark:bg-emerald-900/20 dark:text-emerald-300 dark:border-emerald-700/60 dark:hover:bg-emerald-900/30'
-                            : inactiveEpisodeClass
-                        } ${isActive ? 'cursor-default' : ''}`.trim()}
-                      title={isWatched && !isActive ? '已观看过' : undefined}
-                      aria-current={isActive ? 'true' : undefined}
-                    >
-                      {isWatched && !isActive && (
-                        <span className='absolute top-1 right-1 h-1.5 w-1.5 rounded-full bg-emerald-500 dark:bg-emerald-400' />
-                      )}
-                      {(() => {
-                        const title = episodes_titles?.[episodeNumber - 1];
-                        if (!title) {
-                          return episodeNumber;
-                        }
-                        // 如果是 OVA 格式，直接返回完整标题
-                        if (title.match(/^OVA\s+\d+/i)) {
-                          return title;
-                        }
-                        // 如果匹配 S01E01 格式，只显示集数部分（去掉 SxxE）
-                        const sxxexxMatch = title.match(/[Ss]\d+[Ee](\d{1,4}(?:\.\d+)?)/);
-                        if (sxxexxMatch) {
-                          return sxxexxMatch[1];
-                        }
-                        // 如果匹配"第X集"、"第X话"、"X集"、"X话"格式，提取中间的数字（支持小数）
-                        const match = title.match(/(?:第)?(\d+(?:\.\d+)?)(?:集|话)/);
-                        if (match) {
-                          return match[1];
-                        }
-                        return title;
-                      })()}
-                    </button>
-                  );
-                });
+                .map((episodeNumber) => (
+                  <EpisodeButton
+                    key={episodeNumber}
+                    episodeNumber={episodeNumber}
+                    isActive={episodeNumber === value}
+                    isWatched={watchedEpisodes.has(episodeNumber)}
+                    originalTitle={episodes_titles?.[episodeNumber - 1]}
+                    inactiveEpisodeClass={inactiveEpisodeClass}
+                    enableOriginalNamePopup={isNetdiskSource(currentSource)}
+                    onSelect={handleEpisodeClick}
+                    onShowOriginalName={showEpisodeNamePopup}
+                  />
+                ));
             })()}
           </div>
         </>
@@ -1188,6 +1376,34 @@ const EpisodeSelector: React.FC<EpisodeSelectorProps> = ({
         }}
         onShowToast={onShowToast}
       />
+
+      {/* 原集名 popup：移动端长按 / 桌面右键，样式对齐标题上方 aka 提示 */}
+      {episodeNamePopup &&
+        typeof document !== 'undefined' &&
+        createPortal(
+          <div
+            className='fixed z-[1000] px-3 py-2 bg-gray-800 dark:bg-gray-900 text-white text-sm rounded-lg shadow-xl pointer-events-none max-w-[min(80vw,20rem)]'
+            style={{
+              left: episodeNamePopup.x,
+              top: episodeNamePopup.y,
+              transform:
+                episodeNamePopup.placement === 'top'
+                  ? 'translate(-50%, -100%)'
+                  : 'translate(-50%, 0)',
+            }}
+            role='tooltip'
+          >
+            <div className='text-sm break-words whitespace-normal'>
+              {episodeNamePopup.title}
+            </div>
+            {episodeNamePopup.placement === 'top' ? (
+              <div className='absolute top-full left-1/2 transform -translate-x-1/2 w-0 h-0 border-l-4 border-r-4 border-t-4 border-transparent border-t-gray-800 dark:border-t-gray-900' />
+            ) : (
+              <div className='absolute bottom-full left-1/2 transform -translate-x-1/2 w-0 h-0 border-l-4 border-r-4 border-b-4 border-transparent border-b-gray-800 dark:border-b-gray-900' />
+            )}
+          </div>,
+          document.body
+        )}
     </div>
   );
 };

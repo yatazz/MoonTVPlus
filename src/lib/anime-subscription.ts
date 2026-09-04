@@ -2,6 +2,11 @@
 import parseTorrentName from 'parse-torrent-name';
 import { parseStringPromise } from 'xml2js';
 
+import {
+  matchesExclude,
+  matchesFilter,
+  pickOnePerEpisode,
+} from '@/lib/anime-keyword-expr';
 import { getConfig, setCachedConfig } from '@/lib/config';
 import { getMagnetBaseUrl, universalMagnetFetch } from '@/lib/magnet.client';
 import { db, getStorage } from '@/lib/db';
@@ -12,6 +17,16 @@ import {
   joinOpenListPath,
 } from '@/lib/openlist-offline-download';
 import { AnimeSubscription, AnimeSubscriptionDownloadTool } from '@/types/anime-subscription';
+
+// 兼容外部从本模块引用匹配工具（仅服务端使用本文件；客户端请直接 import anime-keyword-expr）
+export {
+  isAnimeCategoryText,
+  matchesExclude,
+  matchesFilter,
+  pickOnePerEpisode,
+  scoreTorrentTitle,
+  validateKeywordExpr,
+} from '@/lib/anime-keyword-expr';
 
 const downloadTools: AnimeSubscriptionDownloadTool[] = ['aria2', 'qBittorrent', 'Transmission'];
 
@@ -25,8 +40,49 @@ const pickRssText = (value: any): string => {
 
 function getAnimeSubscriptionDownloadTool(tool: unknown): AnimeSubscriptionDownloadTool {
   return typeof tool === 'string' && downloadTools.includes(tool as AnimeSubscriptionDownloadTool)
-    ? tool as AnimeSubscriptionDownloadTool
+    ? (tool as AnimeSubscriptionDownloadTool)
     : 'aria2';
+}
+
+/**
+ * 搜索用集数 token：个位数补零（2 → 02），≥10 原样
+ */
+export function formatEpisodeSearchToken(episode: number): string {
+  if (!Number.isFinite(episode) || episode < 0) return '';
+  const n = Math.floor(episode);
+  return n < 10 ? String(n).padStart(2, '0') : String(n);
+}
+
+/**
+ * 标题是否明确包含目标集数（避免 1080/720/年份等误命中）
+ * 认可形态示例：[02]、[2]、第02集、EP02、E02、 - 02 [
+ */
+export function titleContainsEpisode(title: string, episode: number): boolean {
+  if (!title || !Number.isFinite(episode) || episode <= 0) return false;
+  const ep = Math.floor(episode);
+  const padded = formatEpisodeSearchToken(ep);
+  const raw = String(ep);
+
+  // 先挖掉分辨率/常见非集数数字，降低误判
+  const cleaned = title
+    .replace(/(?:^|[^0-9])(?:240|360|480|720|1080|1440|2160|4k|8k)(?:p|P|i|I)?(?![0-9])/g, ' ')
+    .replace(/(?:19|20)\d{2}/g, ' '); // 年份
+
+  const patterns: RegExp[] = [
+    new RegExp(`\\[0*${ep}\\]`), // [02] [2]
+    new RegExp(`第0*${ep}[集话話]`),
+    new RegExp(`(?:^|[^A-Za-z0-9])EP?0*${ep}(?![0-9])`, 'i'), // EP02 E02
+    new RegExp(`(?:^|[^0-9])0*${ep}(?=\\s*[\\]\\-–—_]|\\s+\\[)`), // 02] / 02 - / 02 [
+    new RegExp(`[-–—_]\\s*0*${ep}(?![0-9])`), // - 02
+    new RegExp(`\\s0*${ep}\\s`), // 空格02空格
+  ];
+
+  // padded 与 raw 在部分形态下等价（上面已用 0*ep）；额外允许字面 [02]
+  if (padded !== raw) {
+    patterns.push(new RegExp(`\\[${padded}\\]`));
+  }
+
+  return patterns.some((re) => re.test(cleaned) || re.test(title));
 }
 
 /**
@@ -36,59 +92,157 @@ export function extractEpisode(title: string): number | null {
   const parsed = parseTorrentName(title);
 
   if (parsed.episode) {
-    return parsed.episode;
+    const ep = Number(parsed.episode);
+    // 过滤明显非集数（分辨率等）
+    if (ep > 0 && ep < 1000 && ![480, 720, 1080, 1440, 2160].includes(ep)) {
+      if (titleContainsEpisode(title, ep) || ep < 100) {
+        return ep;
+      }
+    }
   }
 
-  // 备用正则匹配
-  const patterns = [
-    /\[(\d+)\]/, // [01]
-    /第(\d+)[集话]/, // 第01集
-    /EP?(\d+)/i, // EP01, E01
-    /\s(\d+)\s/, // 空格01空格
+  // 备用正则匹配（带集数语义，避免裸数字）
+  const patterns: Array<[RegExp, number]> = [
+    [/\[(\d{1,3})\]/, 1], // [01]
+    [/第(\d{1,3})[集话話]/, 1], // 第01集
+    [/(?:^|[^A-Za-z0-9])EP?(\d{1,3})(?![0-9])/i, 1], // EP01, E01
+    [/[-–—_]\s*(\d{1,3})(?![0-9])/, 1], // - 01
+    [/\s(\d{1,3})\s/, 1], // 空格01空格（最后兜底）
   ];
 
-  for (const pattern of patterns) {
+  for (const [pattern] of patterns) {
     const match = title.match(pattern);
     if (match) {
-      return parseInt(match[1], 10);
+      const ep = parseInt(match[1], 10);
+      if (
+        !Number.isFinite(ep) ||
+        ep <= 0 ||
+        ep >= 1000 ||
+        [480, 720, 1080, 1440, 2160].includes(ep)
+      ) {
+        continue;
+      }
+      // 空格数字兜底时必须再过 titleContainsEpisode，降低误伤
+      if (pattern.source.includes('\\s') && !titleContainsEpisode(title, ep)) {
+        continue;
+      }
+      return ep;
     }
   }
 
   return null;
 }
 
-/**
- * 解析逗号分隔关键词（兼容中文逗号）
- */
-function parseKeywords(text: string): string[] {
-  return text
-    .replace(/，/g, ',')
-    .split(',')
-    .map((k) => k.trim())
-    .filter(Boolean);
+type AcgSearchItem = {
+  title: string;
+  link?: string;
+  guid?: string;
+  pubDate?: string;
+  torrentUrl?: string;
+  description?: string;
+  episode?: number | null;
+};
+
+function filterAndParseEpisodes(
+  results: AcgSearchItem[],
+  subscription: AnimeSubscription,
+  opts?: { onlyEpisode?: number; minEpisodeExclusive?: number }
+): AcgSearchItem[] {
+  const only = opts?.onlyEpisode;
+  const minExclusive = opts?.minEpisodeExclusive ?? -Infinity;
+
+  return results
+    .filter((item) => matchesFilter(item.title, subscription.filterText))
+    .filter((item) => !matchesExclude(item.title, subscription.excludeText))
+    .map((item) => {
+      const episode = extractEpisode(item.title);
+      return { ...item, episode };
+    })
+    .filter((item) => {
+      if (!item.episode) return false;
+      if (only != null) {
+        return (
+          item.episode === only && titleContainsEpisode(item.title, only)
+        );
+      }
+      return item.episode > minExclusive;
+    })
+    .sort((a, b) => (a.episode || 0) - (b.episode || 0));
 }
 
 /**
- * 检查标题是否匹配过滤条件（包含关键词，AND：必须全部命中）
+ * 缺集补搜：在 (lastEpisode, maxFound] 内对未命中集按「番名 + 补零集数」再搜
  */
-export function matchesFilter(title: string, filterText: string): boolean {
-  if (!filterText) return true;
+async function refillMissingEpisodeResults(
+  subscription: AnimeSubscription,
+  existing: AcgSearchItem[]
+): Promise<AcgSearchItem[]> {
+  const last = subscription.lastEpisode || 0;
+  const foundEps = new Set(
+    existing
+      .map((i) => i.episode)
+      .filter((ep): ep is number => typeof ep === 'number' && ep > last)
+  );
+  if (foundEps.size === 0) return existing;
 
-  // 支持多个关键词，用逗号分隔，必须全部匹配
-  const keywords = parseKeywords(filterText);
+  const maxFound = Math.max(...Array.from(foundEps));
+  const missing: number[] = [];
+  for (let ep = last + 1; ep <= maxFound; ep += 1) {
+    if (!foundEps.has(ep)) missing.push(ep);
+  }
+  if (missing.length === 0) return existing;
 
-  return keywords.every((keyword) => title.includes(keyword));
-}
+  // 单次检查最多补搜 24 集，避免源站压力过大
+  const toSearch = missing.slice(0, 24);
+  console.log(
+    `[AnimeSubscription] ${subscription.title}: 缺集重新检索 ${toSearch.join(
+      ','
+    )}（上限内；总缺 ${missing.length}）`
+  );
 
-/**
- * 检查标题是否命中排除关键词（OR：任一命中即排除）
- */
-export function matchesExclude(title: string, excludeText?: string): boolean {
-  if (!excludeText) return false;
+  const merged = [...existing];
+  const haveEp = new Set(foundEps);
 
-  const keywords = parseKeywords(excludeText);
+  for (const ep of toSearch) {
+    const token = formatEpisodeSearchToken(ep);
+    const keyword = `${subscription.title} ${token}`.trim();
+    try {
+      const results = await searchACG(keyword, subscription.source);
+      const matched = filterAndParseEpisodes(results, subscription, {
+        onlyEpisode: ep,
+      });
+      if (matched.length === 0) {
+        console.log(
+          `[AnimeSubscription] ${subscription.title}: 补搜「${keyword}」未命中第${ep}集`
+        );
+        continue;
+      }
+      for (const item of matched) {
+        if (item.episode && !haveEp.has(item.episode)) {
+          // 同集先都放进池子，后续 onePerEpisode 再择优
+        }
+        merged.push(item);
+      }
+      haveEp.add(ep);
+      console.log(
+        `[AnimeSubscription] ${subscription.title}: 补搜第${ep}集命中 ${matched.length} 条`
+      );
+    } catch (err) {
+      console.error(
+        `[AnimeSubscription] ${subscription.title}: 补搜第${ep}集失败`,
+        err
+      );
+    }
+  }
 
-  return keywords.some((keyword) => title.includes(keyword));
+  return merged
+    .filter(
+      (item) =>
+        item.episode &&
+        item.episode > last &&
+        titleContainsEpisode(item.title, item.episode)
+    )
+    .sort((a, b) => (a.episode || 0) - (b.episode || 0));
 }
 
 /**
@@ -340,20 +494,43 @@ export async function checkSubscription(subscription: AnimeSubscription) {
   // 1. 搜索资源
   const results = await searchACG(subscription.title, subscription.source);
 
-  // 2. 过滤并解析集数（包含关键词 AND，排除关键词 OR）
-  const newEpisodes = results
-    .filter((item: any) => matchesFilter(item.title, subscription.filterText))
-    .filter((item: any) => !matchesExclude(item.title, subscription.excludeText))
-    .map((item: any) => ({
-      episode: extractEpisode(item.title),
-      ...item,
-    }))
-    .filter((item: any) => item.episode && item.episode > subscription.lastEpisode)
-    .sort((a: any, b: any) => a.episode! - b.episode!);
+  // 2. 过滤并解析集数（关键词支持 & | ()；旧逗号兼容）
+  let newEpisodes = filterAndParseEpisodes(results, subscription, {
+    minEpisodeExclusive: subscription.lastEpisode,
+  });
+
+  // 2a. 缺集重新检索（可选）：首搜跳集时按「番名 + 补零集数」补搜中间集
+  if (subscription.refillMissingEpisodes) {
+    newEpisodes = await refillMissingEpisodeResults(subscription, newEpisodes);
+  }
+
+  // 2b. 单集只下载一次（每条订阅可选，默认关）
+  if (subscription.onePerEpisode) {
+    const before = newEpisodes.length;
+    newEpisodes = pickOnePerEpisode(
+      newEpisodes.filter(
+        (item): item is AcgSearchItem & { episode: number; title: string } =>
+          typeof item.episode === 'number' && !!item.title
+      )
+    );
+    if (before > newEpisodes.length) {
+      console.log(
+        `[AnimeSubscription] ${subscription.title}: 单集只下一次，${before} → ${newEpisodes.length} 条`
+      );
+      for (const item of newEpisodes) {
+        console.log(
+          `[AnimeSubscription] ${subscription.title}: 第${item.episode}集选用「${item.title}」`
+        );
+      }
+    }
+  }
 
   // 3. 下载新集数
-  const downloaded = [];
+  const downloaded: number[] = [];
   for (const item of newEpisodes) {
+    if (typeof item.episode !== 'number' || !item.torrentUrl) {
+      continue;
+    }
     try {
       const downloadPath = joinOpenListPath(
         getOfflineDownloadBasePath(config),
@@ -362,7 +539,7 @@ export async function checkSubscription(subscription: AnimeSubscription) {
       await addOfflineDownload(item.torrentUrl, downloadPath);
 
       // 成功后更新 lastEpisode
-      subscription.lastEpisode = item.episode!;
+      subscription.lastEpisode = item.episode;
       downloaded.push(item.episode);
 
       console.log(

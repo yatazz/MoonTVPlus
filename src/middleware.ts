@@ -5,7 +5,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { isAccessTokenInvalidated } from '@/lib/access-token-invalidation';
 import { getAuthInfoFromCookie } from '@/lib/auth';
 import { TOKEN_CONFIG } from '@/lib/refresh-token';
-import { isTVModeEnabled } from '@/lib/tv-mode';
+import { isTVModeEnabled, resolveLoginPath } from '@/lib/tv-mode';
 
 export async function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
@@ -158,9 +158,7 @@ function handleAuthFailure(
   }
 
   // TV 端页面未授权时进入电视扫码登录页
-  const loginUrl = pathname.startsWith('/tv')
-    ? new URL('/tv/login', request.url)
-    : new URL('/login', request.url);
+  const loginUrl = new URL(resolveLoginPath(pathname), request.url);
   // 保留完整的URL，包括查询参数
   const fullUrl = `${pathname}${request.nextUrl.search}`;
   loginUrl.searchParams.set('redirect', fullUrl);

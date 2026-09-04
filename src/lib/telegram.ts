@@ -1,8 +1,7 @@
 /* eslint-disable no-console,@typescript-eslint/no-explicit-any */
 
-import { HttpsProxyAgent } from 'https-proxy-agent';
 import type { NextRequest } from 'next/server';
-import nodeFetch from 'node-fetch';
+import { safeFetch } from './safe-http';
 
 import type { AdminConfig } from './admin.types';
 import {
@@ -13,6 +12,7 @@ import { getConfig } from './config';
 import { db, getStorage } from './db';
 import { lockManager } from './lock';
 import type { IStorage, Notification } from './types';
+import { normalizeApiBaseUrl } from './url';
 import { getNotificationClickUrl } from './web-push';
 
 export interface TelegramConfig {
@@ -426,7 +426,7 @@ function isCloudflareEnvironment(): boolean {
 }
 
 function normalizeTelegramApiBaseUrl(input?: string | null): string {
-  const base = (input || 'https://api.telegram.org').trim().replace(/\/+$/, '');
+  const base = normalizeApiBaseUrl(input || 'https://api.telegram.org');
   return base || 'https://api.telegram.org';
 }
 
@@ -455,14 +455,8 @@ async function fetchTelegramApi(
   }
 
   const fetchOptions: any = { ...init };
-  if (config?.apiProxy) {
-    fetchOptions.agent = new HttpsProxyAgent(config.apiProxy, {
-      timeout: 30000,
-      keepAlive: false,
-    });
-  }
 
-  return nodeFetch(requestUrl, fetchOptions) as unknown as Response;
+  return safeFetch(requestUrl, fetchOptions, config?.apiProxy) as unknown as Response;
 }
 
 export async function setTelegramWebhook(

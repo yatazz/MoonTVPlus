@@ -142,30 +142,25 @@ function applyClientAdProxyToEpisodes(
   });
 }
 
+/**
+ * 网盘集标题：保留完整文件名（去掉常见视频扩展名），
+ * 供前端选集按钮长按/右键查看全名；按钮短标签仍由前端从文件名提取集数。
+ * `parsed` 仅用于排序，不再覆盖为「第N集」。
+ */
 function formatNetdiskEpisodeTitle(
-  parsed: {
+  _parsed: {
     season?: number;
     episode?: number;
   },
   fallback: string
 ) {
-  if (parsed.season && parsed.episode) {
-    const season = String(Math.trunc(parsed.season)).padStart(2, '0');
-    const episodeValue = parsed.episode;
-    const episode = Number.isInteger(episodeValue)
-      ? String(Math.trunc(episodeValue)).padStart(2, '0')
-      : String(episodeValue);
-    return `S${season}E${episode}`;
-  }
-
-  if (parsed.episode) {
-    const episodeValue = parsed.episode;
-    return Number.isInteger(episodeValue)
-      ? `第${Math.trunc(episodeValue)}集`
-      : `第${episodeValue}集`;
-  }
-
-  return fallback;
+  const name = (fallback || '').trim();
+  if (!name) return fallback;
+  // 去掉末尾视频扩展名，保留完整可读文件名
+  return name.replace(
+    /\.(mp4|mkv|ts|m2ts|avi|mov|wmv|flv|webm|m4v|rmvb|iso|mpg|mpeg|m3u8)$/i,
+    ''
+  );
 }
 
 /**
@@ -1101,7 +1096,7 @@ export async function GET(request: NextRequest) {
       const { getCachedVideoInfo, setCachedVideoInfo } = await import(
         '@/lib/openlist-cache'
       );
-      const { parseVideoFileName } = await import('@/lib/video-parser');
+      const { formatEpisodeDisplayTitle, parseVideoFileName } = await import('@/lib/video-parser');
 
       const client = new OpenListClient(
         openListConfig.URL,
@@ -1184,6 +1179,13 @@ export async function GET(request: NextRequest) {
         setCachedVideoInfo(folderPath, videoInfo);
       }
 
+      const parsedSeasons = new Set(
+        videoFiles
+          .map((file) => parseVideoFileName(file.name).season)
+          .filter((season): season is number => typeof season === 'number')
+      );
+      const hasMultipleSeasons = parsedSeasons.size > 1;
+
       const episodes = videoFiles
         .map((file, index) => {
           const parsed = parseVideoFileName(file.name);
@@ -1204,11 +1206,12 @@ export async function GET(request: NextRequest) {
               parsed_from: 'filename',
             };
           }
-          let displayTitle = episodeInfo.title;
-          if (!displayTitle && episodeInfo.episode) {
-            displayTitle = episodeInfo.isOVA
-              ? `OVA ${episodeInfo.episode}`
-              : `第${episodeInfo.episode}集`;
+          let displayTitle = formatEpisodeDisplayTitle(
+            { episode: episodeInfo.episode, season: episodeInfo.season, isOVA: episodeInfo.isOVA },
+            hasMultipleSeasons
+          );
+          if (!displayTitle) {
+            displayTitle = episodeInfo.title;
           }
           if (!displayTitle) {
             displayTitle = file.name;

@@ -51,6 +51,13 @@ const MobileActionSheet: React.FC<MobileActionSheetProps> = ({
   const [isTitleOverflowing, setIsTitleOverflowing] = useState(false);
   const backdropPressStarted = useRef(false);
   const titleRef = useRef<HTMLHeadingElement>(null);
+  const actionsListRef = useRef<HTMLDivElement>(null);
+
+  // 操作区可滚动：有可用播放源最多显示 4 项，否则最多 6 项
+  const hasPlaySources = Boolean(isAggregate && sources && sources.length > 0);
+  // 单项 py-4(2rem) + 内容 h-6(1.5rem) = 3.5rem
+  const actionsMaxVisible = hasPlaySources ? 4 : 6;
+  const actionsMaxHeight = `calc(3.5rem * ${actionsMaxVisible})`;
 
   // 确保组件在客户端挂载后才渲染 Portal
   useEffect(() => {
@@ -165,6 +172,31 @@ const MobileActionSheet: React.FC<MobileActionSheetProps> = ({
       observer.disconnect();
     };
   }, [isVisible, title]);
+
+  // 操作列表：用非 passive 的 wheel 监听，保证鼠标滚轮可滚动且不穿透到背景
+  useEffect(() => {
+    if (!isVisible) return;
+    const el = actionsListRef.current;
+    if (!el) return;
+
+    const handleWheel = (e: WheelEvent) => {
+      e.stopPropagation();
+      const { scrollTop, scrollHeight, clientHeight } = el;
+      if (scrollHeight <= clientHeight) {
+        e.preventDefault();
+        return;
+      }
+      const maxScrollTop = scrollHeight - clientHeight;
+      const next = Math.min(maxScrollTop, Math.max(0, scrollTop + e.deltaY));
+      if (next !== scrollTop) {
+        el.scrollTop = next;
+      }
+      e.preventDefault();
+    };
+
+    el.addEventListener('wheel', handleWheel, { passive: false });
+    return () => el.removeEventListener('wheel', handleWheel);
+  }, [isVisible, actionsMaxVisible]);
 
   // ESC键关闭
   useEffect(() => {
@@ -337,62 +369,75 @@ const MobileActionSheet: React.FC<MobileActionSheetProps> = ({
           </button>
         </div>
 
-        {/* 操作列表 */}
+        {/* 操作列表：有源最多 4 项 / 无源最多 6 项，超出可滑动（支持触控与鼠标滚轮） */}
         <div className="px-4 py-2">
-          {actions.map((action, index) => (
-            <div key={action.id}>
-              <button
-                onClick={() => {
-                  action.onClick();
-                  onClose();
-                }}
-                disabled={action.disabled}
-                className={`
-                  w-full flex items-center gap-4 py-4 px-2 transition-all duration-150 ease-out
-                  ${action.disabled
-                    ? 'opacity-50 cursor-not-allowed'
-                    : `${getActionHoverColor(action.color)} active:scale-[0.98]`
-                  }
-                `}
-                style={{ willChange: 'transform, background-color' }}
-              >
-                {/* 图标 - 使用线条风格 */}
-                <div className="w-6 h-6 flex items-center justify-center flex-shrink-0">
-                  <span className={`transition-colors duration-150 ${action.disabled
-                    ? 'text-gray-400 dark:text-gray-600'
-                    : getActionColor(action.color)
-                    }`}>
-                    {action.icon}
-                  </span>
-                </div>
+          <div
+            ref={actionsListRef}
+            className="overflow-y-auto overscroll-contain"
+            style={{
+              maxHeight: actionsMaxHeight,
+              WebkitOverflowScrolling: 'touch',
+            }}
+            onTouchMove={(e) => {
+              // 允许操作列表内部滑动，阻止冒泡到外层遮罩
+              e.stopPropagation();
+            }}
+          >
+            {actions.map((action, index) => (
+              <div key={action.id}>
+                <button
+                  onClick={() => {
+                    action.onClick();
+                    onClose();
+                  }}
+                  disabled={action.disabled}
+                  className={`
+                    w-full flex items-center gap-4 py-4 px-2 transition-all duration-150 ease-out
+                    ${action.disabled
+                      ? 'opacity-50 cursor-not-allowed'
+                      : `${getActionHoverColor(action.color)} active:scale-[0.98]`
+                    }
+                  `}
+                  style={{ willChange: 'transform, background-color' }}
+                >
+                  {/* 图标 - 使用线条风格 */}
+                  <div className="w-6 h-6 flex items-center justify-center flex-shrink-0">
+                    <span className={`transition-colors duration-150 ${action.disabled
+                      ? 'text-gray-400 dark:text-gray-600'
+                      : getActionColor(action.color)
+                      }`}>
+                      {action.icon}
+                    </span>
+                  </div>
 
-                {/* 文字 */}
-                <span className={`
-                  text-left font-medium text-base flex-1
-                  ${action.disabled
-                    ? 'text-gray-400 dark:text-gray-600'
-                    : 'text-gray-900 dark:text-gray-100'
-                  }
-                `}>
-                  {action.label}
-                </span>
-
-                {/* 播放进度 - 只在播放按钮且有播放记录时显示 */}
-                {action.id === 'play' && currentEpisode && totalEpisodes && (
-                  <span className="text-sm text-gray-500 dark:text-gray-400 font-medium">
-                    {currentEpisode}/{totalEpisodes}
+                  {/* 文字 */}
+                  <span className={`
+                    text-left font-medium text-base flex-1
+                    ${action.disabled
+                      ? 'text-gray-400 dark:text-gray-600'
+                      : 'text-gray-900 dark:text-gray-100'
+                    }
+                  `}>
+                    {action.label}
                   </span>
+
+                  {/* 播放进度 - 只在播放按钮且有播放记录时显示 */}
+                  {action.id === 'play' && currentEpisode && totalEpisodes && (
+                    <span className="text-sm text-gray-500 dark:text-gray-400 font-medium">
+                      {currentEpisode}/{totalEpisodes}
+                    </span>
+                  )}
+
+
+                </button>
+
+                {/* 分割线 - 最后一项不显示 */}
+                {index < actions.length - 1 && (
+                  <div className="border-b border-gray-100 dark:border-gray-800 ml-10"></div>
                 )}
-
-
-              </button>
-
-              {/* 分割线 - 最后一项不显示 */}
-              {index < actions.length - 1 && (
-                <div className="border-b border-gray-100 dark:border-gray-800 ml-10"></div>
-              )}
-            </div>
-          ))}
+              </div>
+            ))}
+          </div>
         </div>
 
         {/* 播放源信息展示区域 */}

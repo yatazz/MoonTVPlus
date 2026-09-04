@@ -43,6 +43,7 @@ import {
   saveDanmakuDisplayState,
   searchAnime,
 } from '@/lib/danmaku/api';
+import { isAnimeCategoryText } from '@/lib/anime-keyword-expr';
 import {
   deleteFavorite,
   generateStorageKey,
@@ -832,6 +833,7 @@ function TVPlayClient() {
         total_time: totalTime,
         save_time: Date.now(),
         search_title: title || detail.title,
+        is_anime: isAnimeCategoryText(detail.type_name, detail.class),
       }).catch(() => undefined);
     };
 

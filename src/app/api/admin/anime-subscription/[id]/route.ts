@@ -2,6 +2,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 
 import { getAuthInfoFromCookie } from '@/lib/auth';
+import { validateKeywordExpr } from '@/lib/anime-keyword-expr';
 import { getConfig } from '@/lib/config';
 import { db } from '@/lib/db';
 
@@ -35,14 +36,47 @@ export async function PUT(
 
     // 更新字段
     if (updates.title !== undefined) {
-      subscription.title = updates.title.trim();
+      const normalizedTitle = String(updates.title).trim().replace(/\s+/g, ' ');
+      if (!normalizedTitle) {
+        return NextResponse.json({ error: '番剧名称不能为空' }, { status: 400 });
+      }
+      const duplicated = subscriptions.some(
+        (sub) =>
+          sub.id !== params.id &&
+          sub.title.trim().replace(/\s+/g, ' ').toLowerCase() ===
+            normalizedTitle.toLowerCase()
+      );
+      if (duplicated) {
+        return NextResponse.json(
+          { error: `已存在同名追番订阅「${normalizedTitle}」，请勿重复添加` },
+          { status: 409 }
+        );
+      }
+      subscription.title = normalizedTitle;
     }
     if (updates.filterText !== undefined) {
+      const filterCheck = validateKeywordExpr(String(updates.filterText), 'and');
+      if (!filterCheck.ok) {
+        return NextResponse.json(
+          { error: `过滤关键词表达式无效: ${filterCheck.error}` },
+          { status: 400 }
+        );
+      }
       subscription.filterText = updates.filterText.trim();
     }
     if (updates.excludeText !== undefined) {
-      subscription.excludeText =
+      const rawExclude =
         typeof updates.excludeText === 'string' ? updates.excludeText.trim() : '';
+      if (rawExclude) {
+        const excludeCheck = validateKeywordExpr(rawExclude, 'or');
+        if (!excludeCheck.ok) {
+          return NextResponse.json(
+            { error: `排除关键词表达式无效: ${excludeCheck.error}` },
+            { status: 400 }
+          );
+        }
+      }
+      subscription.excludeText = rawExclude;
     }
     if (updates.source !== undefined) {
       if (!['acgrip', 'mikan', 'dmhy', 'nyaa'].includes(updates.source)) {
@@ -52,6 +86,14 @@ export async function PUT(
     }
     if (updates.enabled !== undefined) {
       subscription.enabled = updates.enabled;
+    }
+    if (updates.onePerEpisode !== undefined) {
+      subscription.onePerEpisode = Boolean(updates.onePerEpisode);
+    }
+    if (updates.refillMissingEpisodes !== undefined) {
+      subscription.refillMissingEpisodes = Boolean(
+        updates.refillMissingEpisodes
+      );
     }
     if (updates.lastEpisode !== undefined) {
       // 验证集数为非负整数
